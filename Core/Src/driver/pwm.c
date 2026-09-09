@@ -128,6 +128,30 @@ void pwm_set_duty_0E3(PWM_Handle *hPWM, uint16_t duty_cycle)
 }
 
 /**
+ * @brief  按脉宽(µs)设置输出 — 舵机标定/微步需要 µs 级分辨率
+ *
+ *         背景: 0E3 千分比接口在 50Hz 下量化步长 = 周期/1000 = 20µs,
+ *               对 270° 舵机即 2.7°/步, SV+ ±1° 微步推不动。
+ *         公式: CCR = pulse_us × (ARR+1) / 周期µs
+ *               50Hz + ARR=19999 → CCR = pulse_us (1µs 分辨率)
+ *         依赖: 先 pwm_set_freq() 设好频率 (策略层不自设频率)
+ */
+void pwm_set_pulse_us(PWM_Handle *hPWM, uint32_t pulse_us)
+{
+    uint32_t freq = pwm_get_freq(hPWM);
+    if (freq == 0) return;                              /* 频率未配置, 拒绝 */
+
+    uint32_t period_us = 1000000 / freq;                /* 周期(µs), 50Hz → 20000 */
+    if (pulse_us > period_us) pulse_us = period_us;     /* 钳位到单周期 */
+
+    uint32_t arr = hPWM->ops->get_arr(hPWM->htim);
+    uint32_t new_ccr = (pulse_us * (arr + 1)) / period_us;
+
+    if (hPWM->ops->get_ccr(hPWM->htim, hPWM->Channel) != new_ccr)
+        hPWM->ops->set_ccr(hPWM->htim, hPWM->Channel, new_ccr);
+}
+
+/**
  * @brief  读取当前占空比（千分比，0～1000）
  *
  *         流程：

@@ -23,6 +23,8 @@
 #include "driver/imu_bridge.h"
 #include "driver/i2c_hardware_ops.h"
 #include "driver/line_follower.h"
+#include "driver/txt_cmd.h"
+#include "driver/servo_bridge.h"
 #include "common/ringbuf.h"
 #include "common/pid.h"
 #include <string.h>
@@ -58,6 +60,9 @@ static int          pid_kp100[2]    = {24, 24}; /* Kp×100 */
 static int          pid_ki100[2]    = {13, 13};
 static int          pid_kd100[2]    = {20, 20};
 static int16_t      rpm_disp[2]     = {0, 0};
+static char         s_last_cmd[20]  = "NONE";  /* 最近执行的命令 (OLED 页6 显示) */
+static char         s_last_resp[20] = "-";     /* 最近应答/回复 (OLED 页4 显示) */
+static uint32_t     t_frame         = 0;       /* 二进制帧最近字节时间戳 (超时重同步) */
 /* USER CODE END PV */
 
 void SystemClock_Config(void);
@@ -94,7 +99,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *hal_huart)
     HAL_UART_Receive_IT(hal_huart, &uart_debug.rx_byte, 1);
 }
 
-/* 文本回应 */
+/* 裸发送: 不记录 OLED 应答页 (寻迹诊断等高频事件用) */
+static void tx_raw(const char *buf, int n)
+{
+    HAL_UART_Transmit(&huart2, (uint8_t *)buf, n, 100);
+}
+
+/* 文本回应: 发送 + 记录到 OLED 页4 (指令接收后的回复, 无线调试确认) */
 static void ack(const char *fmt, ...)
 {
     char buf[80];
@@ -102,11 +113,82 @@ static void ack(const char *fmt, ...)
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    if (n > 0) HAL_UART_Transmit(&huart2, (uint8_t *)buf, n, 100);
+    if (n > 0) {
+        tx_raw(buf, n);
+        /* 手动截断复制, 消除 -Wformat-truncation (截断是预期行为) */
+        size_t rn = ((size_t)n < sizeof(s_last_resp) - 1) ? (size_t)n : sizeof(s_last_resp) - 1;
+        memcpy(s_last_resp, buf, rn);
+        s_last_resp[rn] = '\0';
+    }
 }
 
-/* 寻迹诊断代理：转发 line_follower 事件到串口 */
-static void line_diag(const char *msg) { ack("%s\r\n", msg); }
+/* 寻迹诊断代理：转发 line_follower 事件到串口 (高频, 不占用应答页) */
+static void line_diag(const char *msg)
+{
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "%s\r\n", msg);
+    if (n > 0) tx_raw(buf, n);
+}
+
+/* float → 1位小数的十分位数字 (替代 %.1f: newlib-nano 缺 _printf_float) */
+static int dec1(float v)
+{
+    if (v < 0) v = -v;
+    int d = (int)((v - (float)(int)v) * 10.0f + 0.5f);
+    return (d > 9) ? 9 : d;
+}
+
+/* ---- 舵机转向状态 ----
+ * 命令域 = 输出域绝对角 (SS2 实测标定 2026-09-09, 手动探边):
+ *   直行 = -90 (833µs), 左满舵 = -65 (上限), 右满舵 = -115 (下限), 行程 ±25
+ * 物理角 = out + 135° (1500µs 电气中位)
+ * ⚠️ 方向备忘: 指令正向(朝-65) = 用户标"左"——摆臂偏装 ~90° 且方向与常规相反,
+ *   SS3 转向模型统一符号; 直行位≠0 由实测决定, SV 0 会 clamp 到左满舵 */
+#define SERVO_RAW_CENTER  135.0f   /* 物理中位角(°) */
+#define SERVO_LIM_L      (-115.0f) /* 输出域下限 = 右满舵(实测) */
+#define SERVO_LIM_R      ( -65.0f) /* 输出域上限 = 左满舵(实测) */
+#define SERVO_CENTER     ( -90.0f) /* 直行位(°) (实测) — 上电/STOP 目标 */
+static float sv_lim_l  = SERVO_LIM_L;
+static float sv_lim_r  = SERVO_LIM_R;
+static float sv_center = SERVO_CENTER;     /* 直行位(°): 上电/STOP 回正目标 */
+static float sv_cmd    = SERVO_CENTER;     /* 当前指令角(°) = 输出域绝对角, 上电回直行 */
+static float sv_out    = SERVO_CENTER;     /* 实际输出角(°) (clamp 后) */
+
+/* 应用当前指令: clamp(指令, 限位) → 驱动层 → 物理脉宽 */
+static void servo_apply(void)
+{
+    float a = sv_cmd;
+    if (a < sv_lim_l) a = sv_lim_l;
+    if (a > sv_lim_r) a = sv_lim_r;
+    sv_out = a;
+    servo_bridge_set_angle(0, SERVO_RAW_CENTER + a);
+}
+
+/* 指令角写入 (clamp 后生效) */
+static void servo_set(float a)
+{
+    if (a < sv_lim_l) a = sv_lim_l;
+    if (a > sv_lim_r) a = sv_lim_r;
+    sv_cmd = a;
+    servo_apply();
+}
+
+/* 记录最近执行的命令, OLED 页6 显示, 用于无线命令执行确认 */
+static void cmd_note(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(s_last_cmd, sizeof(s_last_cmd), fmt, ap);
+    va_end(ap);
+}
+
+/* OLED 整行写入: 补齐/截断到 21 字符, 定宽覆盖无残留, 无需先清屏 */
+static void oled_line(uint8_t page, const char *s)
+{
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%-21.21s", s);
+    oled_bridge_show_line_small(page, buf);
+}
 /* USER CODE END 0 */
 
 int main(void)
@@ -125,7 +207,10 @@ int main(void)
     MX_I2C2_Init();
 
     /* USER CODE BEGIN 2 */
-    /* ---- UART ---- */
+    /* ---- UART (BT04 蓝牙串口) ----
+     * PA2/PA3 现接 BT04, 透明传输波特率 9600, 覆盖 CubeMX 默认 115200 */
+    huart2.Init.BaudRate = 9600;
+    if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
     ringbuf_init(&g_ringbuf_debug);
     HAL_UART_Receive_IT(&huart2, &uart_debug.rx_byte, 1);
     HAL_UART_Transmit(&huart2, (uint8_t *)"UART2 Ready\r\n", 13, 100);
@@ -155,6 +240,11 @@ int main(void)
     /* ---- 舵机 50Hz ---- */
     pwm_set_freq(&pwm_tim4_ch3, 50); pwm_start(&pwm_tim4_ch3);
 
+    /* ---- 舵机转向桥 (PB8): 上电回中位 = 安全铁律 ---- */
+    servo_bridge_init(0, SERVO_PROTOCOL_PWM, &pwm_tim4_ch3);
+    servo_bridge_start(0);
+    servo_apply();
+
     /* ---- OLED ---- */
     oled_bridge_init();
     oled_bridge_show_string_small(0,0,"BLUEPILL PID OK");
@@ -182,87 +272,186 @@ int main(void)
         static uint8_t txt_len = 0;
         uint8_t b;
         while (ringbuf_read(&g_ringbuf_debug, &b) == 0) {
-            if (b == 0xAA && !in_frame) { f_len = 0; in_frame = 1; }
+            if (b == 0xAA && !in_frame) { f_len = 0; in_frame = 1; t_frame = HAL_GetTick(); }
             if (in_frame) {
                 if (f_len >= sizeof(frame)) { in_frame = 0; continue; }
                 frame[f_len++] = b;
+                t_frame = HAL_GetTick();
                 if (f_len >= 2 && frame[f_len-2] == 0xFF && frame[f_len-1] == 0xFF) {
                     uint8_t cmd = frame[1], flen = f_len - 2;
-                    if      (cmd == 0x01 && flen >= 7) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); spd_target[id] = (v>0)?v:(-v); spd_dir[id] = (v>=0)?1:-1; ack("M%d:%dRPM\r\n",id,(int)(v+0.5f)); }
-                    else if (cmd == 0x02 && flen >= 7) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); motor_bridge_set_speed_mps(id,v); ack("M%d:%dcm/s\r\n",id,(int)(v*100+0.5f)); }
-                    else if (cmd == 0x03 && flen >= 3) { uint8_t id = frame[2]; spd_target[id]=0; pid_reset(&pid_spd[id]); motor_bridge_brake(id); ack("M%d:BRAKE\r\n",id); }
-                    else if (cmd == 0xE0 && flen >= 15) { uint8_t id = frame[2]; float kp,ki,kd; memcpy(&kp,&frame[3],4); memcpy(&ki,&frame[7],4); memcpy(&kd,&frame[11],4); pid_set_gains(&pid_spd[id],kp,ki,kd); ack("OK\r\n"); }
-                    else if (cmd == 0xF0) { ack("PONG\r\n"); }
-                    else { ack("?\r\n"); }
+                    if      (cmd == 0x01 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); spd_target[id] = (v>0)?v:(-v); spd_dir[id] = (v>=0)?1:-1; cmd_note("M%d=%dRPM", id, (int)(v>0?v:-v)); ack("M%d:%dRPM\r\n",id,(int)(v+0.5f)); }
+                    else if (cmd == 0x02 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); motor_bridge_set_speed_mps(id,v); cmd_note("M%d=%dcm/s", id, (int)(v*100)); ack("M%d:%dcm/s\r\n",id,(int)(v*100+0.5f)); }
+                    else if (cmd == 0x03 && flen >= 3 && frame[2] < 2) { uint8_t id = frame[2]; line_follower_enable(0); spd_target[id]=0; pid_reset(&pid_spd[id]); motor_bridge_brake(id); cmd_note("BRK%d", id); ack("M%d:BRAKE\r\n",id); }
+                    else if (cmd == 0x10 && flen >= 7 && frame[2] < 1) { float v; memcpy(&v,&frame[3],4); servo_set(v); cmd_note("SV=%d.%d", (int)sv_out, dec1(sv_out)); ack("SV:%d.%d\r\n", (int)sv_out, dec1(sv_out)); }
+                    else if (cmd == 0xE0 && flen >= 15 && frame[2] < 2) { uint8_t id = frame[2]; float kp,ki,kd; memcpy(&kp,&frame[3],4); memcpy(&ki,&frame[7],4); memcpy(&kd,&frame[11],4); pid_set_gains(&pid_spd[id],kp,ki,kd); cmd_note("PID%d", id); ack("OK\r\n"); }
+                    else if (cmd == 0xF0) { cmd_note("PING->PONG"); ack("PONG\r\n"); }
+                    else { cmd_note("ERR:%02X", cmd); ack("?\r\n"); }
                     in_frame = 0; f_len = 0;
                 }
                 continue;
             }
+            if (b == '\r') continue;  /* 兼容手机APP "\r\n" 行尾: 否则 "PING\r" 匹配失败 */
             if (b == '\n') txt[txt_len] = 0;
             else if (txt_len < 19) { txt[txt_len++] = b; continue; }
-            if (txt_len > 0 && txt[0] == 'P') {
-                int id, a, c, d;
-                if (sscanf((char*)txt, "P%d %d %d %d", &id, &a, &c, &d) == 4 && id < 2) {
-                    pid_kp100[id]=a; pid_ki100[id]=c; pid_kd100[id]=d;
-                    pid_set_gains(&pid_spd[id], a*0.01f, c*0.01f, d*0.01f);
-                    ack("PID%d:%d %d %d\r\n", id, a, c, d);
-                }
-            } else if (txt_len > 0 && txt[0] == 'S') {
-                int t;
-                t=pid_kp100[0]; pid_kp100[0]=pid_kp100[1]; pid_kp100[1]=t;
-                t=pid_ki100[0]; pid_ki100[0]=pid_ki100[1]; pid_ki100[1]=t;
-                t=pid_kd100[0]; pid_kd100[0]=pid_kd100[1]; pid_kd100[1]=t;
-                for (int i=0;i<2;i++) pid_set_gains(&pid_spd[i], pid_kp100[i]*0.01f, pid_ki100[i]*0.01f, pid_kd100[i]*0.01f);
-                ack("SWAP:M0 %d %d %d  M1 %d %d %d\r\n",
-                    pid_kp100[0],pid_ki100[0],pid_kd100[0],
-                    pid_kp100[1],pid_ki100[1],pid_kd100[1]);
-            } else if (txt_len > 0 && txt[0] == 'L') {
-                int en;
-                if (sscanf((char*)txt, "L %d", &en) == 1) {
-                    line_follower_enable(en ? 1 : 0);
-                    if (!en) { spd_target[0]=0; spd_target[1]=0; }
-                    ack("LINE:%s\r\n", en ? "ON" : "OFF");
-                }
-            } else if (txt_len > 0 && txt[0] == 'L' && txt[1] == 'A') {
-                int en;
-                if (sscanf((char*)txt, "LA %d", &en) == 1) { line_follower_set_auto(en); ack("LA:%d\r\n", en); }
-            } else if (txt_len > 0 && txt[0] == 'G' && txt[1] == 'K') {
-                float kp;
-                if (sscanf((char*)txt, "GK %f", &kp) == 1) { line_follower_set_kp(kp); ack("GK:%.1f\r\n", kp); }
-            } else if (txt_len > 0 && txt[0] == 'G' && txt[1] == 'D') {
-                float kd;
-                if (sscanf((char*)txt, "GD %f", &kd) == 1) { line_follower_set_kd(kd); ack("GD:%.1f\r\n", kd); }
-            } else if (txt_len > 0 && txt[0] == 'G' && txt[1] == 'S') {
-                float spd;
-                if (sscanf((char*)txt, "GS %f", &spd) == 1) { line_follower_set_speed(spd); ack("GS:%.1f\r\n", spd); }
-            } else if (txt_len > 0 && txt[0] == 'G' && txt[1] == 'I') {
-                line_follower_invert();
-                ack("GI:%d\r\n", line_follower_inverted());
-            } else if (txt_len > 0 && txt[0] == 'G' && txt[1] == 'C') {
-                int c;
-                if (sscanf((char*)txt, "GC %d", &c) == 1 && c > 0) { line_follower_set_straight_cnt(c); ack("GC:%d\r\n", c); }
-            } else if (txt_len > 0 && txt[0] == 'G' && txt[1] == 'T') {
-                int c;
-                if (sscanf((char*)txt, "GT %d", &c) == 1 && c > 0) { line_follower_set_turn_cnt(c); ack("GT:%d\r\n", c); }
-            } else if (txt_len > 0 && txt[0] == 'E') {
-                int id, ppr;
-                if (sscanf((char*)txt, "E%d %d", &id, &ppr) == 2 && id < 2 && ppr > 0) {
-                    if (id == 0) henc1.ppr = (uint16_t)ppr;
-                    else         henc2.ppr = (uint16_t)ppr;
-                    ack("PPR%d:%d\r\n", id, ppr);
-                }
-            } else if (txt_len > 0) {
-                int a, c, d;
-                if (sscanf((char*)txt, "%d %d %d", &a, &c, &d) == 3) {
-                    for (int i = 0; i < 2; i++) {
-                        pid_kp100[i]=a; pid_ki100[i]=c; pid_kd100[i]=d;
-                        pid_set_gains(&pid_spd[i], a*0.01f, c*0.01f, d*0.01f);
+            if (txt_len > 0) {
+                /* 文本命令解析已模块化到 txt_cmd.c (PC 测试桩覆盖 41 用例),
+                 * 手写数值解析替代 sscanf %f (newlib-nano 缺 _scanf_float 静默失败) */
+                TxtCmd tc;
+                if (txt_cmd_parse((char *)txt, &tc)) {
+                    switch (tc.type) {
+                    case TXTCMD_PING:
+                        cmd_note("PING->PONG");
+                        ack("PONG\r\n");
+                        break;
+                    case TXTCMD_STOP:
+                        for (int i = 0; i < 2; i++) { spd_target[i]=0; pid_reset(&pid_spd[i]); motor_bridge_brake(i); }
+                        /* 急停语义 = 彻底停: 必须同步关巡线+自动启动,
+                         * 否则 50ms 后状态机重写 spd_target, 车会"复活"(实测踩坑) */
+                        line_follower_enable(0);
+                        line_follower_set_auto(0);
+                        servo_set(sv_center);  /* 前轮回直行位 (实测 -90, 非 0) */
+                        cmd_note("STOP ALL");
+                        ack("STOP OK LINE OFF\r\n");
+                        break;
+                    case TXTCMD_MOTOR: {
+                        int id = tc.i0;
+                        float v = tc.f0;
+                        line_follower_enable(0);  /* 手动指令优先: 退出巡线接管, 否则 50ms 后被覆盖 */
+                        spd_target[id] = (v >= 0) ? v : -v;
+                        spd_dir[id]    = (v >= 0) ? 1 : -1;
+                        cmd_note("M%d=%dRPM", id, (int)((v >= 0) ? v : -v));
+                        ack("M%d:%dRPM\r\n", id, (int)(v + ((v < 0) ? -0.5f : 0.5f)));
+                        break;
                     }
-                    ack("PID ALL:%d %d %d\r\n", a, c, d);
+                    case TXTCMD_MOTOR_BOTH: {
+                        float v = tc.f0;
+                        line_follower_enable(0);  /* 手动指令优先 */
+                        spd_target[0] = spd_target[1] = (v >= 0) ? v : -v;
+                        spd_dir[0]    = spd_dir[1]    = (v >= 0) ? 1 : -1;
+                        cmd_note("MS=%dRPM", (int)((v >= 0) ? v : -v));
+                        ack("MS:%dRPM\r\n", (int)(v + ((v < 0) ? -0.5f : 0.5f)));
+                        break;
+                    }
+                    case TXTCMD_BRAKE: {
+                        int id = tc.i0;
+                        line_follower_enable(0);  /* 手动指令优先 */
+                        spd_target[id] = 0; pid_reset(&pid_spd[id]); motor_bridge_brake(id);
+                        cmd_note("BRK%d", id);
+                        ack("M%d:BRAKE\r\n", id);
+                        break;
+                    }
+                    case TXTCMD_PID_SET: {
+                        int lo = (tc.i0 < 0) ? 0 : tc.i0, hi = (tc.i0 < 0) ? 1 : tc.i0;
+                        for (int i = lo; i <= hi; i++) {
+                            pid_kp100[i] = tc.i1; pid_ki100[i] = tc.i2; pid_kd100[i] = tc.i3;
+                            pid_set_gains(&pid_spd[i], tc.i1*0.01f, tc.i2*0.01f, tc.i3*0.01f);
+                        }
+                        if (tc.i0 < 0) ack("PID ALL:%d %d %d\r\n", tc.i1, tc.i2, tc.i3);
+                        else           ack("PID%d:%d %d %d\r\n", tc.i0, tc.i1, tc.i2, tc.i3);
+                        cmd_note("PID SET");
+                        break;
+                    }
+                    case TXTCMD_PID_SWAP: {
+                        int t;
+                        t=pid_kp100[0]; pid_kp100[0]=pid_kp100[1]; pid_kp100[1]=t;
+                        t=pid_ki100[0]; pid_ki100[0]=pid_ki100[1]; pid_ki100[1]=t;
+                        t=pid_kd100[0]; pid_kd100[0]=pid_kd100[1]; pid_kd100[1]=t;
+                        for (int i=0;i<2;i++) pid_set_gains(&pid_spd[i], pid_kp100[i]*0.01f, pid_ki100[i]*0.01f, pid_kd100[i]*0.01f);
+                        cmd_note("PID SWAP");
+                        ack("SWAP:M0 %d %d %d  M1 %d %d %d\r\n",
+                            pid_kp100[0],pid_ki100[0],pid_kd100[0],
+                            pid_kp100[1],pid_ki100[1],pid_kd100[1]);
+                        break;
+                    }
+                    case TXTCMD_LINE_EN: {
+                        int en = tc.i0 ? 1 : 0;
+                        line_follower_enable(en);
+                        if (!en) { spd_target[0]=0; spd_target[1]=0; }
+                        cmd_note("LINE %s", en ? "ON" : "OFF");
+                        ack("LINE:%s\r\n", en ? "ON" : "OFF");
+                        break;
+                    }
+                    case TXTCMD_LINE_AUTO:
+                        line_follower_set_auto(tc.i0 ? 1 : 0);
+                        cmd_note("AUTO %d", tc.i0 ? 1 : 0);
+                        ack("LA:%d\r\n", tc.i0 ? 1 : 0);
+                        break;
+                    case TXTCMD_GK:
+                        line_follower_set_kp(tc.f0);
+                        cmd_note("GK=%d.%d", (int)tc.f0, dec1(tc.f0));
+                        ack("GK:%d.%d\r\n", (int)tc.f0, dec1(tc.f0));
+                        break;
+                    case TXTCMD_GD:
+                        line_follower_set_kd(tc.f0);
+                        cmd_note("GD=%d.%d", (int)tc.f0, dec1(tc.f0));
+                        ack("GD:%d.%d\r\n", (int)tc.f0, dec1(tc.f0));
+                        break;
+                    case TXTCMD_GS:
+                        line_follower_set_speed(tc.f0);
+                        cmd_note("GS=%d.%d", (int)tc.f0, dec1(tc.f0));
+                        ack("GS:%d.%d\r\n", (int)tc.f0, dec1(tc.f0));
+                        break;
+                    case TXTCMD_GI:
+                        line_follower_invert();
+                        cmd_note("GI");
+                        ack("GI:%d\r\n", line_follower_inverted());
+                        break;
+                    case TXTCMD_GC:
+                        line_follower_set_straight_cnt(tc.i0);
+                        cmd_note("GC=%d", tc.i0);
+                        ack("GC:%d\r\n", tc.i0);
+                        break;
+                    case TXTCMD_GT:
+                        line_follower_set_turn_cnt(tc.i0);
+                        cmd_note("GT=%d", tc.i0);
+                        ack("GT:%d\r\n", tc.i0);
+                        break;
+                    case TXTCMD_PPR:
+                        if (tc.i0 == 0) henc1.ppr = (uint16_t)tc.i1;
+                        else            henc2.ppr = (uint16_t)tc.i1;
+                        cmd_note("PPR%d=%d", tc.i0, tc.i1);
+                        ack("PPR%d:%d\r\n", tc.i0, tc.i1);
+                        break;
+                    case TXTCMD_SERVO:
+                        servo_set(tc.f0);
+                        cmd_note("SV=%d.%d", (int)sv_out, dec1(sv_out));
+                        ack("SV:%d.%d\r\n", (int)sv_out, dec1(sv_out));
+                        break;
+                    case TXTCMD_SERVO_NUDGE:
+                        servo_set(sv_cmd + (float)tc.i0);
+                        cmd_note("SV=%d.%d", (int)sv_out, dec1(sv_out));
+                        ack("SV:%d.%d\r\n", (int)sv_out, dec1(sv_out));
+                        break;
+                    case TXTCMD_SERVO_LIM:
+                        if      (tc.i0 == 0) sv_lim_l  = tc.f0;
+                        else if (tc.i0 == 1) sv_lim_r  = tc.f0;
+                        else                 sv_center = tc.f0;
+                        /* 限位合法性: 下限<上限、直行位落在区间内、值域 ±135°
+                         * (命令域为输出域绝对角, 直行位≠0 是正常机构安装) */
+                        if (sv_lim_l > sv_lim_r) { float t = sv_lim_l; sv_lim_l = sv_lim_r; sv_lim_r = t; }
+                        if (sv_lim_l < -135.0f)  sv_lim_l = -135.0f;
+                        if (sv_lim_r >  135.0f)  sv_lim_r = 135.0f;
+                        if (sv_center < sv_lim_l) sv_center = sv_lim_l;
+                        if (sv_center > sv_lim_r) sv_center = sv_lim_r;
+                        servo_apply();  /* 新限位立即生效 */
+                        cmd_note("S%c=%d.%d", "LRC"[tc.i0], (int)tc.f0, dec1(tc.f0));
+                        ack("S%c:%d.%d\r\n", "LRC"[tc.i0], (int)tc.f0, dec1(tc.f0));
+                        break;
+                    default:
+                        break;
+                    }
+                } else {
+                    /* 识别失败的文本回 '?', 无线调试时确认"收到了但没看懂" */
+                    cmd_note("ERR TXT");
+                    ack("?\r\n");
                 }
             }
             txt_len = 0;
         }
+
+        /* 无线丢包保护: 二进制帧不完整超过 100ms 丢弃, 重新同步
+         * (无线链路可能吞掉帧尾 0xFF 0xFF, 不复位会卡住后续解析) */
+        if (in_frame && (HAL_GetTick() - t_frame) > 100) { in_frame = 0; f_len = 0; }
 
         /* ② PID 独立运行 — 每 50ms，不受 OLED 拖累 */
         uint32_t now = HAL_GetTick();
@@ -275,7 +464,13 @@ int main(void)
                                  encoder_get_count(&henc2));
 
             for (uint8_t m = 0; m < 2; m++) {
-                if (spd_target[m] < 1.0f) continue;
+                if (spd_target[m] < 1.0f) {
+                    /* 0速语义 = 停车: 释放PID + 物理刹停 (否则PWM保持旧值, 无线发 M0 0 车不停) */
+                    pid_reset(&pid_spd[m]);
+                    motor_bridge_brake(m);
+                    rpm_disp[m] = 0;
+                    continue;
+                }
                 /* 内侧轮停车：冻结 PID + 物理刹停，退出转弯时从零起步 */
                 if (spd_dir[m] == 0) {
                     pid_reset(&pid_spd[m]);
@@ -331,60 +526,51 @@ int main(void)
             /* IMU 校准完成后自动启动寻迹 */
             line_follower_try_auto_start(prog >= 100, now);
 
-            /* VOFA+: M0_act,M0_tgt,M1_act,M1_tgt,Roll*10,Yaw*10 */
-            char u[64];
-            int len = snprintf(u,sizeof(u),"channels: %d,%d,%d,%d,%d,%d\n",
-                     rpm_disp[0],(int)spd_target[0],rpm_disp[1],(int)spd_target[1],
-                     ri*10+(ri>=0?rd:-rd), yi*10+(yi>=0?yd:-yd));
-            if(len>0) HAL_UART_Transmit(&huart2, (uint8_t *)u, len, 100);
-
-            /* OLED 刷新（6x8 小字体，8 页 × 21 列） */
-            for (int p=0;p<8;p++) oled_bridge_show_string_small(p,0,"                     ");
-
-            char b[22];
+            /* OLED 刷新（6x8 小字体, 整行单事务写入; 定宽补齐无残留, 免清屏） */
+            char b[26];
             /* 页0: IMU 欧拉角 */
-            snprintf(b,22,"R:%d.%d P:%d.%d Y:%d.%d",ri,rd,pi,pd,yi,yd);
-            oled_bridge_show_string_small(0,0,b);
+            snprintf(b,26,"R:%d.%d P:%d.%d Y:%d.%d",ri,rd,pi,pd,yi,yd);
+            oled_line(0,b);
             /* 页1: PID 速度 实际->目标 */
-            snprintf(b,22,"M0:%d->%d  M1:%d->%d",
+            snprintf(b,26,"M0:%d->%d  M1:%d->%d",
                      rpm_disp[0],(int)spd_target[0],rpm_disp[1],(int)spd_target[1]);
-            oled_bridge_show_string_small(1,0,b);
+            oled_line(1,b);
             /* 页2: 编码器计数（标定转弯/直行距离用） */
-            snprintf(b,22,"ENC0:%d  ENC1:%d",
+            snprintf(b,26,"ENC0:%d  ENC1:%d",
                      (int)enc1, (int)enc2);
-            oled_bridge_show_string_small(2,0,b);
+            oled_line(2,b);
             /* 页3: 灰度 + IMU 状态 */
             uint8_t g1=HAL_GPIO_ReadPin(OUT1_GPIO_Port,OUT1_Pin);
             uint8_t g2=HAL_GPIO_ReadPin(OUT2_GPIO_Port,OUT2_Pin);
             uint8_t g3=HAL_GPIO_ReadPin(OUT3_GPIO_Port,OUT3_Pin);
             uint8_t g4=HAL_GPIO_ReadPin(OUT4_GPIO_Port,OUT4_Pin);
             uint8_t g5=HAL_GPIO_ReadPin(OUT5_GPIO_Port,OUT5_Pin);
-            snprintf(b,22,"G:%d%d%d%d%d  %s",
+            snprintf(b,26,"G:%d%d%d%d%d  %s",
                      g1?1:0,g2?1:0,g3?1:0,g4?1:0,g5?1:0, (prog<100)?"CAL":"OK");
-            oled_bridge_show_string_small(3,0,b);
-            /* 页4: 方向 */
-            snprintf(b,22,"DIR M0:%c M1:%c",
-                     spd_dir[0]>0?'+':'-', spd_dir[1]>0?'+':'-');
-            oled_bridge_show_string_small(4,0,b);
-            /* 页5: PID 参数 M0 */
-            snprintf(b,22,"M0 P:%d I:%d D:%d",
-                     pid_kp100[0], pid_ki100[0], pid_kd100[0]);
-            oled_bridge_show_string_small(5,0,b);
-            /* 页6: PID 参数 M1 */
-            snprintf(b,22,"M1 P:%d I:%d D:%d",
-                     pid_kp100[1], pid_ki100[1], pid_kd100[1]);
-            oled_bridge_show_string_small(6,0,b);
+            oled_line(3,b);
+            /* 页4: 最近应答 (指令接收后的回复, 无线调试确认) */
+            snprintf(b,26,"RSP:%-17s", s_last_resp);
+            oled_line(4,b);
+            /* 页5: PID 参数 M0/M1 (合并一行, 腾出命令显示页) */
+            snprintf(b,26,"P%d,%d I%d,%d D%d,%d",
+                     pid_kp100[0], pid_kp100[1],
+                     pid_ki100[0], pid_ki100[1],
+                     pid_kd100[0], pid_kd100[1]);
+            oled_line(5,b);
+            /* 页6: 最近执行的命令 (无线命令执行确认) */
+            snprintf(b,26,"CMD:%-16s", s_last_cmd);
+            oled_line(6,b);
             /* 页7: 寻迹 + 校准 + 转弯状态 */
             if (prog < 100) {
-                snprintf(b,22,"CAL:%d%%  AUTO:%d", prog, line_follower_auto());
+                snprintf(b,26,"CAL:%d%%  AUTO:%d", prog, line_follower_auto());
             } else if (!line_follower_enabled()) {
-                snprintf(b,22,"LINE:OFF SPD:%d", (int)line_follower_base_spd());
+                snprintf(b,26,"LINE:OFF SPD:%d", (int)line_follower_base_spd());
             } else {
                 const char *st[] = {"FOLLOW","?","TURNING","EXIT","SEARCH"};
                 uint8_t ls = line_follower_state();
-                snprintf(b,22,"LINE %s SPD:%d", st[ls>4?0:ls], (int)line_follower_base_spd());
+                snprintf(b,26,"LINE %s SPD:%d", st[ls>4?0:ls], (int)line_follower_base_spd());
             }
-            oled_bridge_show_string_small(7,0,b);
+            oled_line(7,b);
         }
     }
 }

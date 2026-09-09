@@ -174,7 +174,7 @@
 #include "servo.h"
 Servo::Servo(IServoProtocol& proto)
    :min_angle(0),
-    max_angle(180),
+    max_angle(270),   /* 本项目舵机: 270° 行程 (500~2500µs), 0°=500µs, 135°=1500µs 中位 */
     protocol(proto)
     {}
 

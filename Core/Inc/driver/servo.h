@@ -17,8 +17,8 @@ class Servo
 {
     public:
     //通用的参数
-    uint8_t min_angle;//角度范围
-    uint8_t max_angle;
+    uint16_t min_angle;//角度范围 (uint16: 需容纳 270° 行程, uint8 会溢出回绕)
+    uint16_t max_angle;
     IServoProtocol& protocol;   //>>>>>>>>>>>>>>>>引用的父抽象类,但是可以注入子具体类,调用的是父抽象类声明子具体类实现的方法
     Servo(IServoProtocol& proto);
     ~Servo();

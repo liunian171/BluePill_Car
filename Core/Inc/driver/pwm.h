@@ -165,6 +165,14 @@ uint16_t pwm_get_duty_0E3(PWM_Handle *hPWM);
  */
 void pwm_set_duty_0E3(PWM_Handle *hPWM, uint16_t duty_cycle);
 
+/**
+ * @brief  按脉宽(µs)设置输出 (舵机等需要 µs 级脉宽的场合)
+ *         动机: 0E3 千分比接口在 50Hz 下量化步长 20µs ≈ 2.7°(270°舵机), 无法微步标定;
+ *         本函数直写 CCR, 分辨率 = 周期/(ARR+1) (50Hz+ARR=19999 时为 1µs)
+ *         组合逻辑: ops->get_arr() → CCR = pulse_us × (ARR+1) / 周期µs → ops->set_ccr()
+ */
+void pwm_set_pulse_us(PWM_Handle *hPWM, uint32_t pulse_us);
+
 
 
 /**
