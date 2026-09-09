@@ -50,6 +50,13 @@ public:
      */
     void show_string_small(uint8_t page, uint8_t col, const char *str);
 
+    /**
+     * @brief 整行写入 6×8 小字 (单次 I2C 事务, 高速刷新用)
+     * @param page 0~7 页
+     * @param str  最长 21 字符, 不足/超出自动截断补齐, 从列 0 开始
+     */
+    void show_line_small(uint8_t page, const char *str);
+
 private:
     void write_cmd(uint8_t cmd);
     void write_cmd_multi(const uint8_t *cmds, uint16_t len);

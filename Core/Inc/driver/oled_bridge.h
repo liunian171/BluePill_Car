@@ -16,6 +16,7 @@ void oled_bridge_init(void);
 void oled_bridge_show_string(uint8_t row, uint8_t col, const char *str);
 void oled_bridge_show_chinese(uint8_t row, uint8_t col, uint8_t index);
 void oled_bridge_show_string_small(uint8_t page, uint8_t col, const char *str);
+void oled_bridge_show_line_small(uint8_t page, const char *str);   /* 整行单事务写入 */
 
 #ifdef __cplusplus
 }

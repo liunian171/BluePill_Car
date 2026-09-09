@@ -136,3 +136,27 @@ void OledDriver::show_string_small(uint8_t page, uint8_t col, const char *str) {
         str++;
     }
 }
+
+/* ==========================================================================
+ *  整行写入 — 128 字节单次 I2C 事务
+ *
+ *  相比逐字符写 (每字符 2 次事务), 整行仅 2 次事务 (定位 + 128B 数据),
+ *  全屏 8 行刷新从 ~550 次事务降到 16 次, I2C 流量降约 10 倍。
+ * ========================================================================== */
+void OledDriver::show_line_small(uint8_t page, const char *str) {
+    if (page > 7 || !str) return;
+
+    uint8_t buf[128];  /* 21 字符 × 6 字节 = 126, 补齐到 128 */
+
+    for (uint8_t ch = 0; ch < 21; ch++) {
+        char c = str[ch] ? str[ch] : ' ';
+        uint8_t idx = (uint8_t)c - 0x20;
+        if (idx > 94) idx = 0;
+        for (uint8_t k = 0; k < 6; k++)
+            buf[ch * 6 + k] = OLED_F6x8[idx][k];
+    }
+    for (uint8_t i = 126; i < 128; i++) buf[i] = 0x00;
+
+    set_pos(page, 0);
+    write(0x40, buf, 128);
+}

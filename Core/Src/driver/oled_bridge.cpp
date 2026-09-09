@@ -24,3 +24,8 @@ void oled_bridge_show_string_small(uint8_t page, uint8_t col, const char *str)
 {
     g_oled.show_string_small(page, col, str);
 }
+
+void oled_bridge_show_line_small(uint8_t page, const char *str)
+{
+    g_oled.show_line_small(page, str);
+}

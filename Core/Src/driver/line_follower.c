@@ -67,7 +67,6 @@ static uint8_t g_brake_cnt  = 0;       /* 回中刹车剩余帧数 */
 static uint8_t g_center_cnt = 0;       /* 连续居中帧数 */
 static uint8_t g_dev_cnt    = 0;       /* 连续偏离帧数 */
 static uint8_t g_osc_cnt    = 0;       /* 震荡帧数（5 帧内换向次数） */
-static uint8_t g_turn_s3_stable = 0;   /* 转弯中 S3 连续稳定帧数 */
 
 /* 诊断回调 */
 static line_event_cb_t g_event_cb = 0;
@@ -104,7 +103,6 @@ void line_follower_init(float base_spd, float kp)
     g_center_cnt = 0;
     g_dev_cnt    = 0;
     g_osc_cnt    = 0;
-    g_turn_s3_stable   = 0;
     g_action     = 0;
     g_last_corr  = 0.0f;
     g_ps1 = g_ps2 = g_ps3 = g_ps4 = g_ps5 = 0;
@@ -337,8 +335,10 @@ void line_follower_update(uint32_t now_ms,
             apply_overshoot_decay();
             corr = corr * 0.5f;
         }
-        /* ── §1E 确认回中（迟滞 2 帧）── */
-        else if (g_center_cnt >= 2 && g_action != 0) {
+        /* ── §1E 回中刹车：S3 亮 + 车正在转 → 立即反向阻尼 ──
+         * 不等迟滞 2 帧。线到 S3 的第一帧就触发，消除 PID 差速残留。
+         * 迟滞只防"边界抖动启动修正"，不防"回中刹车"。 */
+        else if (g_s3 && g_action != 0) {
             apply_reverse_brake();
             corr = -(g_last_corr) * 0.5f;
             g_center_cnt = 0;
@@ -372,12 +372,11 @@ void line_follower_update(uint32_t now_ms,
             g_tick  = now_ms;
             g_pos_prev = 0.0f;   /* 防止退出时 d_pos 伪跳变 */
             g_last_pos = 0.0f;
-            g_turn_s3_stable = 0; /* 新转弯，S3 稳定计数从零开始 */
         }
         break;
 
     /* ================================================================== */
-    /*  TURNING — 单侧轮驱动转弯，全白不等超时                             */
+    /*  TURNING — 单侧轮驱动转弯，全白不等超时，黑线出现交 FOLLOW 自然接管  */
     /* ================================================================== */
     case LINE_TURNING:
         spd_target[0] = g_turn_spd;
@@ -392,32 +391,24 @@ void line_follower_update(uint32_t now_ms,
             g_action   = -1;
         }
 
-        /* 强制归零，转弯中 EMA 无意义 */
-        g_pos_prev = 0.0f;
+        /* 保持 EMA 更新，退出时 PD 能自然接管 */
+        g_pos_prev = g_last_pos;
 
-        /* S3 连续稳定计数：区分"黑线路过 S3"和"黑线停在 S3" */
-        if (g_s3)  g_turn_s3_stable++;
-        else       g_turn_s3_stable = 0;
-
-        /* 优先级 1：S3 连续 2 帧 + 已转弯 ≥ 500ms → 确认黑线稳定在中心，回正 */
-        if (g_turn_s3_stable >= 2 && (now_ms - g_tick > 500)) {
+        /* 优先级 1：任意传感器看到黑线 + 已转弯 ≥ 500ms → 交 FOLLOW 接管 */
+        if (g_sum > 0 && (now_ms - g_tick > 500)) {
             notify("LINE:FOUND");
             spd_dir[0] = 1; spd_dir[1] = 1;
             g_state    = LINE_FOLLOW;
             g_cool_end = now_ms + 800;
-            g_brake_cnt = 4;                                    /* 200ms 强力刹车 */
-            g_last_corr = (g_turn_dir > 0) ? 16.0f : -16.0f;   /* → corr = ∓8.0, 差速 16 RPM */
-            g_action = 0;
-            g_turn_s3_stable = 0;
+            /* 不设 g_brake_cnt，FOLLOW 的传感器逻辑自然决定修正方向和力度 */
         }
-        /* 优先级 2：真超时 3s → 搜索 */
+        /* 优先级 2：真超时 3s 仍全白 → 搜索 */
         else if (g_sum == 0 && (now_ms - g_tick > 3000)) {
             notify("LINE:SRCH");
             spd_dir[0] = 1; spd_dir[1] = 1;
             g_state = LINE_SEARCH;
             g_tick  = now_ms;
             g_action = g_turn_dir;
-            g_turn_s3_stable = 0;
         }
         /* 优先级 3：全白 → 正常，继续转（不等超时） */
         break;
