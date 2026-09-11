@@ -5,46 +5,63 @@
  *
  *  层位（自顶向下，详见 doc/代码风格与模块衔接指南 §1.2）：
  *    组装层        main.c             实例创建 / 命令转发 / 接管权仲裁
- *    执行组件      steering（待建）   钳位 + 域换算 + 标定限位      ← 见 S2/S3/S4
- *    执行对象层    Servo              ← 本文件：角度 → 千分比（器件语言）
+ *    执行组件      steering           意图(输出域角) → 器件级目标(物理角)
+ *    执行对象层    Servo              ← 本文件：物理角 → 千分比
  *    器件层        PWMServoProtocol    千分比 → 脉宽 µs
  *    驱动策略层    pwm_set_pulse_us    脉宽 → CCR（1µs 分辨率）
  *    驱动平台层    pwm_platform_ops    寄存器写（唯一碰 HAL）
  *
- *  本文件职责：角度域 → 千分比换算（单一职责）。
- *  依赖白名单：IServoProtocol（构造注入引用）、tool.h（map）。
- *  禁止：直调 HAL / 直调 pwm / 依赖具体协议类实现。
+ *  本文件职责：物理角 → 千分比换算 + 器件行程极限钳位（单一职责，两项）。
+ *  依赖白名单：IServoProtocol（构造注入引用）
+ *  禁止：直调 HAL / 直调 pwm / 依赖具体协议类实现
  *
  *  可移植性：换 MCU 平台 —— 不动本文件；换舵机器件 —— 不动本文件
- *            （协议变化只需新增一个 IServoProtocol 派生类）。
+ *            （行程参数经构造注入，新增 IServoProtocol 派生类即可）
  *
- *  ⚠️ 已知偏差（待治理，编号见 doc/舵机代码结构对照分析.md）：
- *    S2  钳位职责缺失——本层定位应含"钳位"，当前无 clamp，
- *        实际 clamp 重复出现在 main.c 的 servo_set/servo_apply
- *    S3  坐标域未声明——本层按物理角 [min_angle, max_angle] 语义；
- *        与命令域（输出域绝对角，直行 = -90）的换算（+135）硬编码在 main.c，
- *        待域契约确定后归位
- *    S10 min_angle / max_angle 为 public 字段，无注入入口
- *        （应改为构造参数或配置注入）
+ *  ▸ 钳位为什么在本层 ◂
+ *    0~270° 是**舵机自身**的物理行程（手册数据），换车/换机构/改标定都不变
+ *    → 属"器件知识"，且 set_angle 是通往器件的必经入口，放这里任何调用方都绕不过。
+ *    对比：本车可用行程 [-115,-65]（输出域）属"车知识"，归执行组件 steering。
  *
- *  历史：本文件头部原为上游驱动工程（A_board_pwm_driver_test，STM32F427）
- *        的设计草案（servo_core / ServoUART / ServoI2C / PCA9685 等，
- *        均未实现），随移植整文件复制；2026-09-11 剥离至
- *        doc/舵机旧设计稿_归档_上游A板.md 保留备查。
+ *  ▸ 历史 ◂
+ *    本文件头部原为上游驱动工程（A_board_pwm_driver_test，STM32F427）的设计草案
+ *    （servo_core / ServoUART / ServoI2C / PCA9685 等，均未实现），随移植整文件复制；
+ *    2026-09-11 剥离至 doc/舵机旧设计稿_归档_上游A板.md 保留备查。
+ *    同日补：器件行程极限钳位、get_angle()、行程参数构造注入（原为 public 裸字段）。
  * ============================================================================
  */
-#include "tool.h"
+
 #include "servo.h"
-Servo::Servo(IServoProtocol& proto)
-   :min_angle(0),
-    max_angle(270),   /* 本项目舵机: 270° 行程 (500~2500µs), 0°=500µs, 135°=1500µs 中位 */
-    protocol(proto)
-    {}
+
+Servo::Servo(IServoProtocol& proto, float min_angle, float max_angle)
+   : min_angle(min_angle),
+     max_angle(max_angle),
+     cur_angle(min_angle),
+     protocol(proto)
+{
+}
 
 void Servo::set_angle(float angle)
-{ 
-    uint16_t rate_0E3=(angle-min_angle)*1000/(max_angle-min_angle);
-    protocol.set_position(rate_0E3);   
+{
+    /* 配置合法性：非法行程直接拒绝输出（不写 CCR），避免除零与语义错乱 */
+    if (max_angle <= min_angle) return;
+
+    /* 器件行程极限钳位（本层兜底：任何调用路径都绕不过） */
+    if (angle < min_angle) angle = min_angle;
+    if (angle > max_angle) angle = max_angle;
+
+    cur_angle = angle;
+
+    /* 物理角 → 千分比：rate = (angle - min) / 行程 × 1000
+     * 钳位后 rate 必然落在 [0,1000]，不存在越界千分比 */
+    uint16_t rate_0E3 = (uint16_t)((angle - min_angle) * 1000.0f / (max_angle - min_angle));
+
+    protocol.set_position(rate_0E3);
+}
+
+float Servo::get_angle() const
+{
+    return cur_angle;
 }
 
 void Servo::start()

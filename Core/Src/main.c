@@ -25,6 +25,7 @@
 #include "driver/line_follower.h"
 #include "driver/txt_cmd.h"
 #include "driver/servo_bridge.h"
+#include "driver/steering.h"
 #include "common/ringbuf.h"
 #include "common/pid.h"
 #include <string.h>
@@ -138,39 +139,33 @@ static int dec1(float v)
     return (d > 9) ? 9 : d;
 }
 
-/* ---- 舵机转向状态 ----
- * 命令域 = 输出域绝对角 (SS2 实测标定 2026-09-09, 手动探边):
- *   直行 = -90 (833µs), 左满舵 = -65 (上限), 右满舵 = -115 (下限), 行程 ±25
- * 物理角 = out + 135° (1500µs 电气中位)
- * ⚠️ 方向备忘: 指令正向(朝-65) = 用户标"左"——摆臂偏装 ~90° 且方向与常规相反,
- *   SS3 转向模型统一符号; 直行位≠0 由实测决定, SV 0 会 clamp 到左满舵 */
-#define SERVO_RAW_CENTER  135.0f   /* 物理中位角(°) */
-#define SERVO_LIM_L      (-115.0f) /* 输出域下限 = 右满舵(实测) */
-#define SERVO_LIM_R      ( -65.0f) /* 输出域上限 = 左满舵(实测) */
-#define SERVO_CENTER     ( -90.0f) /* 直行位(°) (实测) — 上电/STOP 目标 */
-static float sv_lim_l  = SERVO_LIM_L;
-static float sv_lim_r  = SERVO_LIM_R;
-static float sv_center = SERVO_CENTER;     /* 直行位(°): 上电/STOP 回正目标 */
-static float sv_cmd    = SERVO_CENTER;     /* 当前指令角(°) = 输出域绝对角, 上电回直行 */
-static float sv_out    = SERVO_CENTER;     /* 实际输出角(°) (clamp 后) */
+/* ---- 转向执行组件 (steering) 配置 + 输出绑定 ----
+ * 坐标系: 输出域绝对角(°) — 直行 = -90, 右满舵 = -115(下限), 左满舵 = -65(上限), 行程 ±25
+ * 标定来源: SS2 实车手动探边 (2026-09-09), 详见 doc/舵机转向设计文档.md §2
+ * 物理角 = 输出角 + SERVO_PHYS_OFFSET (135° 电气中位 = 前轮正前, 摆臂安装偏置)
+ * ⚠️ 方向备忘: 指令正向(朝 -65) = 用户标"左"——摆臂偏装 ~90° 且方向与常规相反,
+ *   SS3 转向模型统一符号; 直行位 ≠ 0 由实测决定, SV 0 会 clamp 到左满舵
+ * 注: 标定值集中于此由组装层注入; 待 car_config 表建立后迁入(结构优化顺序分析 §8.2 序 7) */
+#define SERVO_PHYS_OFFSET   135.0f    /* 输出域 → 物理角 安装偏置(°) */
+#define SERVO_LIM_MIN     (-115.0f)   /* 输出域下限 = 右满舵(实测) */
+#define SERVO_LIM_MAX     ( -65.0f)   /* 输出域上限 = 左满舵(实测) */
+#define SERVO_CENTER      ( -90.0f)   /* 直行位(°) (实测) — 上电/STOP 目标 */
+#define SERVO_LIM_ABS       135.0f    /* 输出域绝对值上限(配置校验用) */
 
-/* 应用当前指令: clamp(指令, 限位) → 驱动层 → 物理脉宽 */
-static void servo_apply(void)
-{
-    float a = sv_cmd;
-    if (a < sv_lim_l) a = sv_lim_l;
-    if (a > sv_lim_r) a = sv_lim_r;
-    sv_out = a;
-    servo_bridge_set_angle(0, SERVO_RAW_CENTER + a);
-}
+static const steering_cfg_t g_steering_cfg = {
+    .lim_min     = SERVO_LIM_MIN,
+    .lim_max     = SERVO_LIM_MAX,
+    .center      = SERVO_CENTER,
+    .phys_offset = SERVO_PHYS_OFFSET,
+    .lim_abs     = SERVO_LIM_ABS,
+    .servo_id    = 0,
+};
 
-/* 指令角写入 (clamp 后生效) */
-static void servo_set(float a)
+/* steering → 桥接层 输出注入
+ * (组件不 include 桥接层头, 保证 steering.c 零依赖、PC 桩可编译 — 指南 §3.2) */
+static void steering_output_to_servo(uint8_t id, float phys_angle)
 {
-    if (a < sv_lim_l) a = sv_lim_l;
-    if (a > sv_lim_r) a = sv_lim_r;
-    sv_cmd = a;
-    servo_apply();
+    servo_bridge_set_angle(id, phys_angle);
 }
 
 /* 记录最近执行的命令, OLED 页6 显示, 用于无线命令执行确认 */
@@ -240,10 +235,12 @@ int main(void)
     /* ---- 舵机 50Hz ---- */
     pwm_set_freq(&pwm_tim4_ch3, 50); pwm_start(&pwm_tim4_ch3);
 
-    /* ---- 舵机转向桥 (PB8): 上电回中位 = 安全铁律 ---- */
+    /* ---- 舵机桥 (PB8) + 转向执行组件: 上电回直行位 = 安全铁律 ---- */
     servo_bridge_init(0, SERVO_PROTOCOL_PWM, &pwm_tim4_ch3);
     servo_bridge_start(0);
-    servo_apply();
+    if (steering_init(&g_steering_cfg, steering_output_to_servo) != STEERING_OK)
+        Error_Handler();
+    steering_center();
 
     /* ---- OLED ---- */
     oled_bridge_init();
@@ -282,7 +279,7 @@ int main(void)
                     if      (cmd == 0x01 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); spd_target[id] = (v>0)?v:(-v); spd_dir[id] = (v>=0)?1:-1; cmd_note("M%d=%dRPM", id, (int)(v>0?v:-v)); ack("M%d:%dRPM\r\n",id,(int)(v+0.5f)); }
                     else if (cmd == 0x02 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); motor_bridge_set_speed_mps(id,v); cmd_note("M%d=%dcm/s", id, (int)(v*100)); ack("M%d:%dcm/s\r\n",id,(int)(v*100+0.5f)); }
                     else if (cmd == 0x03 && flen >= 3 && frame[2] < 2) { uint8_t id = frame[2]; line_follower_enable(0); spd_target[id]=0; pid_reset(&pid_spd[id]); motor_bridge_brake(id); cmd_note("BRK%d", id); ack("M%d:BRAKE\r\n",id); }
-                    else if (cmd == 0x10 && flen >= 7 && frame[2] < 1) { float v; memcpy(&v,&frame[3],4); servo_set(v); cmd_note("SV=%d.%d", (int)sv_out, dec1(sv_out)); ack("SV:%d.%d\r\n", (int)sv_out, dec1(sv_out)); }
+                    else if (cmd == 0x10 && flen >= 7 && frame[2] < 1) { float v; memcpy(&v,&frame[3],4); steering_set(v); float a = steering_get(); cmd_note("SV=%d.%d", (int)a, dec1(a)); ack("SV:%d.%d\r\n", (int)a, dec1(a)); }
                     else if (cmd == 0xE0 && flen >= 15 && frame[2] < 2) { uint8_t id = frame[2]; float kp,ki,kd; memcpy(&kp,&frame[3],4); memcpy(&ki,&frame[7],4); memcpy(&kd,&frame[11],4); pid_set_gains(&pid_spd[id],kp,ki,kd); cmd_note("PID%d", id); ack("OK\r\n"); }
                     else if (cmd == 0xF0) { cmd_note("PING->PONG"); ack("PONG\r\n"); }
                     else { cmd_note("ERR:%02X", cmd); ack("?\r\n"); }
@@ -309,7 +306,7 @@ int main(void)
                          * 否则 50ms 后状态机重写 spd_target, 车会"复活"(实测踩坑) */
                         line_follower_enable(0);
                         line_follower_set_auto(0);
-                        servo_set(sv_center);  /* 前轮回直行位 (实测 -90, 非 0) */
+                        steering_center();  /* 前轮回直行位 (实测 -90, 非 0) */
                         cmd_note("STOP ALL");
                         ack("STOP OK LINE OFF\r\n");
                         break;
@@ -412,31 +409,34 @@ int main(void)
                         cmd_note("PPR%d=%d", tc.i0, tc.i1);
                         ack("PPR%d:%d\r\n", tc.i0, tc.i1);
                         break;
-                    case TXTCMD_SERVO:
-                        servo_set(tc.f0);
-                        cmd_note("SV=%d.%d", (int)sv_out, dec1(sv_out));
-                        ack("SV:%d.%d\r\n", (int)sv_out, dec1(sv_out));
+                    case TXTCMD_SERVO: {
+                        steering_set(tc.f0);
+                        float a = steering_get();            /* 回显实际生效角(钳位后) */
+                        cmd_note("SV=%d.%d", (int)a, dec1(a));
+                        ack("SV:%d.%d\r\n", (int)a, dec1(a));
                         break;
-                    case TXTCMD_SERVO_NUDGE:
-                        servo_set(sv_cmd + (float)tc.i0);
-                        cmd_note("SV=%d.%d", (int)sv_out, dec1(sv_out));
-                        ack("SV:%d.%d\r\n", (int)sv_out, dec1(sv_out));
+                    }
+                    case TXTCMD_SERVO_NUDGE: {
+                        steering_nudge((float)tc.i0);
+                        float a = steering_get();
+                        cmd_note("SV=%d.%d", (int)a, dec1(a));
+                        ack("SV:%d.%d\r\n", (int)a, dec1(a));
                         break;
-                    case TXTCMD_SERVO_LIM:
-                        if      (tc.i0 == 0) sv_lim_l  = tc.f0;
-                        else if (tc.i0 == 1) sv_lim_r  = tc.f0;
-                        else                 sv_center = tc.f0;
-                        /* 限位合法性: 下限<上限、直行位落在区间内、值域 ±135°
-                         * (命令域为输出域绝对角, 直行位≠0 是正常机构安装) */
-                        if (sv_lim_l > sv_lim_r) { float t = sv_lim_l; sv_lim_l = sv_lim_r; sv_lim_r = t; }
-                        if (sv_lim_l < -135.0f)  sv_lim_l = -135.0f;
-                        if (sv_lim_r >  135.0f)  sv_lim_r = 135.0f;
-                        if (sv_center < sv_lim_l) sv_center = sv_lim_l;
-                        if (sv_center > sv_lim_r) sv_center = sv_lim_r;
-                        servo_apply();  /* 新限位立即生效 */
-                        cmd_note("S%c=%d.%d", "LRC"[tc.i0], (int)tc.f0, dec1(tc.f0));
-                        ack("S%c:%d.%d\r\n", "LRC"[tc.i0], (int)tc.f0, dec1(tc.f0));
+                    }
+                    case TXTCMD_SERVO_LIM: {
+                        /* 限位=配置态: 由 steering 组件唯一持有并归一化
+                         * (下限<上限自动交换、限幅到 ±lim_abs、直行位拉回区间内) */
+                        steering_ret_t r;
+                        if      (tc.i0 == 0) r = steering_set_limit_min(tc.f0);
+                        else if (tc.i0 == 1) r = steering_set_limit_max(tc.f0);
+                        else                 r = steering_set_center(tc.f0);
+                        /* 非法值: 组件已钳位保底, 此处回显请求值并标记 BAD (义务 6: 不静默) */
+                        cmd_note("S%c=%d.%d%s", "LRC"[tc.i0], (int)tc.f0, dec1(tc.f0),
+                                 (r == STEERING_OK) ? "" : "!");
+                        ack("S%c:%d.%d%s\r\n", "LRC"[tc.i0], (int)tc.f0, dec1(tc.f0),
+                            (r == STEERING_OK) ? "" : " BAD");
                         break;
+                    }
                     default:
                         break;
                     }
