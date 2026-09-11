@@ -3,3 +3,4 @@ mx.scratch
 !.settings
 __pycache__/
 *.pyc
+.workbuddy/
