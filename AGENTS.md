@@ -68,7 +68,7 @@ Core/Src/driver/
   ├─ 桥接层   motor_bridge/servo_bridge/oled_bridge/imu_bridge ← C 门面: 查 id → 转发
   ├─ 组件层   决策: line_follower.c(巡线状态机)                ← 物理量→运动意图
   │          感知: 姿态/巡线感知（待从 imu_bridge/line_follower 拆出）← 裸数→物理量
-  │          执行: 速度环/转向（待从 main 拆出）                 ← 意图→器件级目标
+  │          执行: steering.c(转向) ✅已建 / 速度环（待从 main 拆出）← 意图→器件级目标
   │          解析: txt_cmd.c(文本命令) uart_cmd_parser.c(协议帧, 死代码待处置)
   ├─ 执行对象层 motor.cpp servo.cpp (旧称功能对象)               ← 器件级目标→器件语言
   ├─ 器件层   TB6612MotorProtocol / PWMServoProtocol / MPU6050(IIMU) (旧称业务对象) ← 器件翻译
