@@ -2,7 +2,11 @@
 #define PWM_H
 
 #include <stdint.h>
-#include "tim.h"
+/* 注: 本头文件不 include 任何 CubeMX/HAL 头 (策略层承诺"换平台零修改", 头文件同样适用)。
+ *     TIM_CHANNEL_x 等宏由真正需要它的平台文件自行 include "tim.h":
+ *       - pwm_instance.c (填实例的 .Channel)
+ *       - pwm_platform_ops.c (操作寄存器)
+ *     历史: 早先实例定义在 pwm.c 末尾, 故此处曾 include tim.h, 实例分离后为多余残留, 2026-09-11 移除。 */
 
 #ifdef __cplusplus
 extern "C" {

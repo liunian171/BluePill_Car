@@ -1,8 +1,5 @@
 #include "pwm.h"
-#include "tim.h"
-#include "pwm_platform_ops.h"            
-                                // TODO: 仅因下方实例定义引用了 htim5 / TIM_CHANNEL_4
-                               //       待实例移至 pwm_instance.c 后可删除此行
+#include "pwm_platform_ops.h"           /* ops 表获取接口（策略层组合 ops 用，不含 HAL） */
 #include <stdint.h>
 
 /**

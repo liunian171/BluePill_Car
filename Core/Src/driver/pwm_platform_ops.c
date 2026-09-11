@@ -1,5 +1,5 @@
 #include "pwm_platform_ops.h"
-#include "tim.h"               // STM32 HAL 库头文件，本文件是唯一依赖它的地方
+#include "tim.h"               // STM32 HAL 库头文件（本文件需要 TIM_CHANNEL_x 等 HAL 宏）
 
 /**
  * ============================================================================
@@ -12,7 +12,9 @@
  *  ▸ 设计要点 ◂
  *  1. 所有函数接收 void *handle，函数体第一行强转为 STM32 自己的类型
  *     → 这样 pwm.h / pwm.c 完全不认识 TIM_HandleTypeDef，实现了解耦
- *  2. 本文件是整套驱动中唯一 #include "tim.h" 的地方
+ *  2. 依赖 tim.h 的文件只剩平台/实例侧：本文件、pwm_instance.c、
+ *     encoder_platform_ops.c、useri2c_ops.c（策略层 pwm.h / pwm.c 已于 2026-09-11 去依赖，
+ *     "换平台零修改"承诺在头文件层同样成立）
  *  3. 换平台（如 GD32）时，新建 pwm_gd32_ops.c，编译本文件即可
  *
  *  ▸ 参数命名约定 ◂
