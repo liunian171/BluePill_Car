@@ -60,17 +60,24 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Debug/BluePill_Car.elf 0x08000000 
 
 ## 四、工程架构现状
 
-### 4.1 分层结构（ops 抽象模式）
+### 4.1 分层结构（ops 抽象模式；🔶 层命名 2026-09-11 按双栈模型修订，详见 doc/代码风格与模块衔接指南 §1，代码目录迁移随实施期）
 
 ```
-Core/Src/common/     ringbuf(串口缓冲) / pid / imu_filter(滤波核心) / tool
+组装层  main.c 用户区（实例创建 + 节拍接线 + 接管权仲裁 + 显示组版）
 Core/Src/driver/
-  ├─ 策略层   pwm.c encoder.c uart.c usergpio.c useri2c.c     ← 平台无关
-  ├─ 平台层   *_platform_ops.c                                 ← 唯一碰 HAL 的地方
-  ├─ 桥接层   motor_bridge/servo_bridge/oled_bridge/imu_bridge ← C++ 对象 → C 接口
-  ├─ 业务对象 motor.cpp servo.cpp imu_base.cpp oled_driver.cpp ← C++，placement new
-  └─ 应用     line_follower.c(巡线状态机) uart_cmd_parser.c(协议帧)
+  ├─ 桥接层   motor_bridge/servo_bridge/oled_bridge/imu_bridge ← C 门面: 查 id → 转发
+  ├─ 组件层   决策: line_follower.c(巡线状态机)                ← 物理量→运动意图
+  │          感知: 姿态/巡线感知（待从 imu_bridge/line_follower 拆出）← 裸数→物理量
+  │          执行: 速度环/转向（待从 main 拆出）                 ← 意图→器件级目标
+  │          解析: txt_cmd.c(文本命令) uart_cmd_parser.c(协议帧, 死代码待处置)
+  ├─ 执行对象层 motor.cpp servo.cpp (旧称功能对象)               ← 器件级目标→器件语言
+  ├─ 器件层   TB6612MotorProtocol / PWMServoProtocol / MPU6050(IIMU) (旧称业务对象) ← 器件翻译
+  ├─ 驱动层   策略层 pwm.c encoder.c uart.c usergpio.c useri2c.c ← 平台无关
+  │          平台层 *_platform_ops.c / i2c_hardware_ops.c      ← 唯一碰 HAL 的地方
+Core/Src/common/     通用算法层: ringbuf / pid / imu_filter(滤波核心) / tool
 ```
+
+数据方向：感知链上行（裸数→物理量）→ 决策（物理量→意图）→ 执行链下行（意图→寄存器）；命令链与显示链经桥接层/组装层正交接入。
 
 - **跨平台约定**: 策略层禁止 include HAL/CubeMX 头；平台依赖全部收敛到 `*_platform_ops.c`（详 pits 见 `doc/移植文档/CrossPlatform_Porting_Preparation.md`）
 - **C/C++ 边界**: `*_bridge.h` 提供 `extern "C"` 接口；C++ 对象一律 `placement new` + 静态池，**禁堆 new**（heap 仅 512B，分配失败静默返回 NULL → 硬错误，已踩坑）
@@ -150,9 +157,14 @@ while(1):
 | 文档 | 定位 |
 |------|------|
 | `doc/工程文档.md` | 架构/引脚/协议/初始化流程权威参考 |
+| `doc/开发跟踪.md` | 阶段/条目状态跟踪（W 无线 / SS 舵机 / 巡线 / 架构治理） |
 | `doc/巡线逻辑设计文档.md` | 巡线状态机唯一权威（决策表+状态机+参数） |
+| `doc/舵机转向设计文档.md` | 舵机阿克曼转向命令域/标定参数权威 |
 | `doc/调试总结.md` | 调试时间线 + 技术要点 + 电机参数 + 命令速查 |
-| `doc/移植文档/Document_Index.md` | 设计文档总索引（含各文档与代码一致性状态） |
+| `doc/架构评审文档.md` | 耦合性/可配置性评审快照 + 治理优先级（C1-C8 发现编号） |
+| `doc/代码风格与模块衔接指南.md` | 代码形态规范：分层性质/命名注释/机制规则/新模块衔接义务 8 项（🔶=新确立条款） |
+| `doc/结构优化顺序分析.md` | 优化治理顺序推演（契约先行/实现后搬）；⚠️ 当前为学习思考期，未启动实施 |
+| `doc/移植文档/Document_Index.md` | 文档总索引（§0 本仓库索引 + 上游驱动工程索引快照） |
 | `doc/移植文档/CrossPlatform_Porting_Preparation.md` | 跨平台移植短板与隐藏平台依赖清单 |
 | `backup/` | 历史版本备份，只读不维护 |
 
@@ -162,6 +174,8 @@ while(1):
 - [ ] PWM_SET_DUTY 命令实现（协议已定义 0x20）
 - [ ] 巡线 PD 参数 + 三层阻尼实车整定（GK/GD/GS 在线调）
 - [ ] 直角弯/SEARCH 状态机实车验证（PC 逻辑推演过，真机未验）
-- [ ] 帧加 CRC / 帧接收超时重置（低优先级）
+- [x] 帧接收超时重同步（`main.c:454`，100ms 无新字节丢弃半帧）✅ 已实现
+- [ ] 帧加 CRC 校验（低优先级）
 
 > 待确认项用 ⚠️ 标注；新条目完成按 §5.4 闭环更新本节与 doc/。
+> 架构治理（C1-C8）当前挂起：处于用户学习思考期，启动时按 `doc/结构优化顺序分析.md` 序列执行。
