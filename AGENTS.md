@@ -56,7 +56,10 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Debug/BluePill_Car.elf 0x08000000 
 **硬件在环两级模式**（沿用 SimpleCar 协议）：
 - **一级（优先）**: Agent 直驱——用户接线完毕告知 → Agent 执行 flash.bat 烧录 + 串口抓日志判读
 - **二级（兜底）**: 指令-回读——Agent 给完整命令行 + 预期现象清单，用户复制执行后回读输出
-- 串口日志是第一证据来源；每 250ms 主动上行 `IMU R:.. P:.. Y:.. ENC1:.. ENC2:..`（校准完成后）
+- 串口日志是第一证据来源。**⚠️ 当前固件无周期上报**（2026-09-11 真机核实），上行只有三类：
+  ① 开机横幅 `UART2 Ready`（复位后一次）；② 命令应答 `ack()`（如 `SV:-90.0` / `M0:60RPM`）；③ 巡线诊断事件 `tx_raw`（`line_follower` 事件回调，仅巡线使能时）
+- IMU 欧拉角 / 编码器 / PID 等周期数据**只刷 OLED（页 0-7）**，不上串口 → 判读这些量需看屏幕，或后续加"按需上报"命令
+- 真机串口端口：BT04 出 SPP 口（本机实测 **COM15**，9600-8N1；端口号会随配对变化，可用 `python -c "import serial.tools.list_ports as p;[print(x.device,x.description) for x in p.comports()]"` 查）
 
 ## 四、工程架构现状
 
@@ -86,10 +89,11 @@ Core/Src/common/     通用算法层: ringbuf / pid / imu_filter(滤波核心) /
 
 ```
 while(1):
-  uart_cmd_parser_tick()      ← while 循环清空 ringbuf（逐字节会丢帧，已踩坑）
-  每 50ms:  line_follower_update → PID 速度环 ×2 → motor_bridge_set_speed_rpm
-  每 100ms: OLED 刷新（先清行再写）+ VOFA+ 上报
-  每 250ms: IMU 滤波更新（前 100 次 ≈25s 为零偏校准期）+ 文本状态上报
+  ① while 清空 ringbuf → 文本命令解析(txt_cmd) / 二进制帧解析(帧超时 100ms 重同步)
+     （uart_cmd_parser_tick 未调用 —— 死代码，评审 C1）
+  每 50ms:  line_follower_update(now,...) → PID 速度环 ×2 → motor_bridge_set_speed_rpm
+            （0 速 = pid_reset + 物理刹停；spd_dir==0 = 内侧轮刹停）
+  每 100ms: imu_bridge_update_filter + 读编码器 + OLED 8 页组版（2026-09-11 核实：无串口上报）
 ```
 
 ### 4.3 巡线状态机（详见 doc/巡线逻辑设计文档.md，唯一权威）
