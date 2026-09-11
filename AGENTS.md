@@ -189,8 +189,14 @@ while(1):
 - [ ] 自查项 N1~N3：`servo_bridge_stop` 死接口（随 C1）、`Servo::get_angle()` 零调用、`steering_is_init/get_lim_*` 仅 PC 桩用 → 用起来或删除
 - [ ] 桥接层家族契约批次：S5（UART 空壳）/ S6（handle 校验）/ S8（错误通道形态）/ S11（感叹号注释）——与 IMU 链、oled 归一合并定方案
 
-**闭环参与**
-- [ ] steering 接入巡线（当前只受命令驱动，未被 `corr` 调用）→ 巡线融合 / T1 转向模型
+**代码卫生**
+- [ ] 死代码清理（清单已定，⚠️ **须逐条执行并即时校验**，见 `调试总结`/`memory` 事故记录：批量 `git rm` 曾误删 70 文件）：
+      `uart_cmd_parser.c/.h`(465行, 评审 C1) + `imu_uart_handler.cpp/.h`(174行, 唯一调用者是被删的 dispatch) + `main.c` 的 `firewater_send()`(0 调用) + `servo_bridge_stop`(N1) + `Servo::get_angle`(N2) + `tool.h` 的 `handle_to_id`(唯一使用者是 C1)
+- [ ] 有意预留项加显式标注（**勿删**）：`useri2c.c/.h`+`useri2c_ops.c/.h`（软 I2C，本工程用硬件 I2C2）、`pwm.h` 的 `PWM_Ch_State`/`Ch_State`/`TIM_PWM_g_Param`
+
+**闭环参与**（⬇️ 已降级：用户 2026-09-11 决定巡线暂不使用、结构保留）
+- [ ] `steering` 接入巡线 `corr → 转向`（**非当前路径**）；`steering` 目前维持"命令驱动的舵机"
+- [ ] T1 转向模型（符号统一 / 非线性曲线 / 阿克曼差速）——同样等巡线重启后再做
 
 > 待确认项用 ⚠️ 标注；新条目完成按 §5.4 闭环更新本节与 doc/。
 > 架构治理（C1-C8）：已从"纯学习期"转为"边定契约边落地"（C6 ✅ / steering ✅）；顺序按 `doc/结构优化顺序分析.md` §8.2，组装层减肥与 C4 仲裁排在组件稳定之后。
