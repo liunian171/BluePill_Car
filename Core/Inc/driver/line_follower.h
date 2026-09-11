@@ -1,15 +1,18 @@
 /**
  * @file    line_follower.h
- * @brief   循迹模块 — 5路灰度传感器 + 四阶段状态机（编码器驱动）
+ * @brief   循迹模块 — 5路灰度传感器 + 四状态机（PD 追线 + 三层阻尼）
  *
- * 策略：
- *   FOLLOW   → 正常追线，比例控制差速转向
- *   STRAIGHT → 丢线后直行（按编码器计数），等轮轴对齐拐角
- *   TURNING  → 原地旋转90°（两轮同速反向），按编码器计数
- *   SEARCH   → 转完前进寻线，找到线恢复跟踪
+ * 状态机（权威设计见 doc/巡线逻辑设计文档.md）：
+ *   FOLLOW    → PD 追线 + 三层阻尼（回中反向阻尼 / 过冲衰减 g_decay / 迟滞确认）
+ *   LINE_EXIT → 直角弯前刹车 200ms，消除直行动量
+ *   TURNING   → 单轮支点转弯（内侧轮刹停，外侧轮驱动）
+ *   SEARCH    → 丢线搜索，800ms 周期摆扫，4s 超时停车
+ *   回正后进入 800ms 冷却期（禁直角检测，PD 自然接管）
  *
  * 依赖：
  *   - 5 路 GPIO 传感器 (main.h 中定义 OUT1~OUT5)
+ *     ⚠️ 当前在 line_follower.c 内直调 HAL_GPIO_ReadPin，未走注入接口
+ *        → 违反 AGENTS.md §5.3，PC 桩不可编译（架构评审 C2，待治理）
  *   - 每 50ms 调用一次 line_follower_update()，传入两路编码器计数值
  *   - 输出 spd_target[2] / spd_dir[2] 供 PID 速度环消费
  */
@@ -24,11 +27,12 @@ extern "C" {
 #endif
 
 /* ---- 状态枚举 ---- */
+/* 注: 值 1 为历史占用（旧 STRAIGHT 态已删除），保留空洞以兼容既有日志/记录 */
 enum {
-    LINE_FOLLOW   = 0,  /* 正常追线 */
-    LINE_TURNING  = 2,  /* 原地旋转 */
-    LINE_EXIT     = 3,  /* 出弯刹车回正 */
-    LINE_SEARCH   = 4,  /* 前进寻线 */
+    LINE_FOLLOW   = 0,  /* 正常追线 (PD + 三层阻尼) */
+    LINE_TURNING  = 2,  /* 单轮支点转弯 */
+    LINE_EXIT     = 3,  /* 弯前刹车 200ms */
+    LINE_SEARCH   = 4,  /* 丢线搜索 (800ms 摆扫) */
 };
 
 /* ---- 初始化 ---- */

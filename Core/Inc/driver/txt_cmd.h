@@ -22,6 +22,9 @@
  *   GI                灰度反转
  *   GC/GT <int>       直行/转弯编码器计数标定 (>0)
  *   E<id> <ppr>       编码器 PPR (id 0/1, ppr>0)
+ *   SV <deg>          舵机转向角 (输出域绝对角, 直行 = -90)
+ *   SV+ / SV-         舵机微步 (±1°)
+ *   SL/SR/SC <deg>    左限/右限/直行位标定 (RAM 生效)
  */
 
 #ifndef __TXT_CMD_H__
@@ -46,8 +49,9 @@ typedef enum {
     TXTCMD_GT,          /* i0>0 */
     TXTCMD_PPR,         /* i0=id, i1=ppr>0 */
 
-    /* ---- 舵机转向 (居中域: 0=直行, +右/−左) ---- */
-    TXTCMD_SERVO,       /* f0=角度(°) */
+    /* ---- 舵机转向 (输出域绝对角: 直行 = -90, clamp [-115, -65]) ----
+     * 语义修订 2026-09-09: 命令 = 输出域绝对角, SC 不叠加 (详 舵机转向设计文档 §3) */
+    TXTCMD_SERVO,       /* f0=角度(°) 输出域绝对角 */
     TXTCMD_SERVO_NUDGE, /* i0=+1/-1 (微步) */
     TXTCMD_SERVO_LIM,   /* i0: 0=SL左限 1=SR右限 2=SC中位修正, f0=值 */
 } TxtCmdType;

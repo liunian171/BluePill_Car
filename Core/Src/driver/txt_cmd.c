@@ -71,7 +71,7 @@ int txt_cmd_parse(const char *s, TxtCmd *o)
     if (strcmp(p, "S")    == 0) { o->type = TXTCMD_PID_SWAP; return 1; }
     if (strcmp(p, "GI")   == 0) { o->type = TXTCMD_GI;       return 1; }
 
-    /* ---- SV <deg> / SV+ / SV- 与 SL/SR/SC <deg> (舵机转向, 居中域) ---- */
+    /* ---- SV <deg> / SV+ / SV- 与 SL/SR/SC <deg> (舵机转向, 输出域绝对角) ---- */
     if (p[0] == 'S' && (p[1] == 'V' || p[1] == 'L' || p[1] == 'R' || p[1] == 'C')) {
         const char *q = p + 2;
         float v;
