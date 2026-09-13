@@ -20,6 +20,7 @@
 #include "driver/usergpio_platform.h"
 #include "driver/encoder.h"
 #include "driver/oled_bridge.h"
+#include "driver/oled_platform_ops.h"
 #include "driver/imu_bridge.h"
 #include "driver/i2c_hardware_ops.h"
 #include "driver/line_follower.h"
@@ -49,6 +50,40 @@ Encoder_Handle henc1, henc2;
 static I2C_Handle imu_i2c = {
     .i2c_context = &hi2c2,
     .ops         = &i2c_hardware_platform_ops_stm32,
+};
+
+/* ==== 桥接层配置表（C1 家族契约：init 一律"配置结构注入"）====
+ * 桥只做"查 id → 校验 → 转发"，所有硬件接线知识（引脚/句柄/方向/地址）在此注入。 */
+
+/* ⚠️ drive_sign（驱动侧方向）与下方速度环标定表的 fb_sign（反馈侧符号）**必须镜像**。
+ *    两者是同一个硬件事实的两面（MOTOR B 的驱动与编码器接线均反相）；
+ *    只改一侧 = 正反馈飞车（2026-09-13 真机实证：两侧失配时 M1 上电持续加速）。
+ *    故两者必须相邻声明，改动时成对修改。 */
+static const motor_bridge_cfg_t g_motor_cfg[2] = {
+    { .protocol = MOTOR_PROTOCOL_TB6612,
+      .pwm = &pwm_tim1_ch1, .ain1 = &motor_a_in1, .ain2 = &motor_a_in2, .stby = NULL,
+      .max_rpm = 319.0f, .wheel_radius_mm = 32.5f,
+      .drive_sign =  1 },
+    { .protocol = MOTOR_PROTOCOL_TB6612,
+      .pwm = &pwm_tim1_ch2, .ain1 = &motor_b_in1, .ain2 = &motor_b_in2, .stby = NULL,
+      .max_rpm = 319.0f, .wheel_radius_mm = 32.5f,
+      .drive_sign = -1 },   /* ← 必须与 g_spd_cfg.ch[1].fb_sign 同号 */
+};
+
+static const servo_bridge_cfg_t g_servo_cfg = {
+    .protocol = SERVO_PROTOCOL_PWM,
+    .handle   = &pwm_tim4_ch3,
+};
+
+static const oled_cfg_t g_oled_cfg = {
+    .i2c_context = &hi2c2,
+    .write       = oled_platform_write_stm32,   /* 平台绑定（器件层零 HAL） */
+    .addr7       = 0x3C,
+};
+
+static const imu_bridge_cfg_t g_imu_cfg = {
+    .type       = IMU_MPU6050,
+    .i2c_handle = &imu_i2c,
 };
 
 /* ==== 速度环执行组件 (speed_loop) 的标定表 —— 组装层只留"配置 + 接线" ====
@@ -134,8 +169,8 @@ static void firewater_send(float *data, uint8_t n)
 /* ==== 速度环组件的 IO 绑定（组装层职责：把组件接口接到器件/传感器）====
  * 组件只持函数指针（不 include 桥接层头），故执行栈向上不反向依赖。
  * 换驱动芯片 / 换编码器接口只改这三个绑定，组件与上层不动。 */
-static void spd_io_set_rpm(uint8_t id, float rpm) { motor_bridge_set_speed_rpm(id, rpm); }
-static void spd_io_brake  (uint8_t id)            { motor_bridge_brake(id); }
+static void spd_io_set_rpm(uint8_t id, float rpm) { (void)motor_bridge_set_speed_rpm(id, rpm); }
+static void spd_io_brake  (uint8_t id)            { (void)motor_bridge_brake(id); }
 static int32_t spd_io_read_enc(uint8_t id)        { return (id == 0) ? encoder_get_count(&henc1)
                                                                       : encoder_get_count(&henc2); }
 static const speed_loop_io_t g_spd_io = {
@@ -223,7 +258,7 @@ static const steering_cfg_t g_steering_cfg = {
  * (组件不 include 桥接层头, 保证 steering.c 零依赖、PC 桩可编译 — 指南 §3.2) */
 static void steering_output_to_servo(uint8_t id, float phys_angle)
 {
-    servo_bridge_set_angle(id, phys_angle);
+    (void)servo_bridge_set_angle(id, phys_angle);   /* 显示/控制链不处理桥错误码（契约 §2.3） */
 }
 
 /* 记录最近执行的命令, OLED 页6 显示, 用于无线命令执行确认 */
@@ -280,9 +315,10 @@ int main(void)
     pwm_set_freq(&pwm_tim1_ch1, 20000); pwm_set_duty_0E3(&pwm_tim1_ch1, 0); pwm_start(&pwm_tim1_ch1);
     pwm_set_freq(&pwm_tim1_ch2, 20000); pwm_set_duty_0E3(&pwm_tim1_ch2, 0); pwm_start(&pwm_tim1_ch2);
 
-    /* ---- 电机桥 ---- */
-    motor_bridge_init(0, &pwm_tim1_ch1, &motor_a_in1, &motor_a_in2, NULL, 319.0f, 32.5f);
-    motor_bridge_init(1, &pwm_tim1_ch2, &motor_b_in1, &motor_b_in2, NULL, 319.0f, 32.5f);
+    /* ---- 电机桥（C1：配置结构注入 + init 失败即停）---- */
+    if (motor_bridge_init(0, &g_motor_cfg[0]) != BRIDGE_OK ||
+        motor_bridge_init(1, &g_motor_cfg[1]) != BRIDGE_OK)
+        Error_Handler();
 
     /* ---- 速度环执行组件 (参数 = SIMC 辨识建议[平衡]档, 2026-09-13 阶跃辨识,
      *      A/B 实测验证: 上升 90% 150ms/零超调 vs 旧参 >3s; 详见 tools/step_ident.py) ----
@@ -296,14 +332,16 @@ int main(void)
     pwm_set_freq(&pwm_tim4_ch3, 50); pwm_start(&pwm_tim4_ch3);
 
     /* ---- 舵机桥 (PB8) + 转向执行组件: 上电回直行位 = 安全铁律 ---- */
-    servo_bridge_init(0, SERVO_PROTOCOL_PWM, &pwm_tim4_ch3);
-    servo_bridge_start(0);
+    if (servo_bridge_init(0, &g_servo_cfg) != BRIDGE_OK)
+        Error_Handler();
+    (void)servo_bridge_start(0);
     if (steering_init(&g_steering_cfg, steering_output_to_servo) != STEERING_OK)
         Error_Handler();
     steering_center();
 
     /* ---- OLED ---- */
-    oled_bridge_init();
+    if (oled_bridge_init(&g_oled_cfg) != BRIDGE_OK)
+        Error_Handler();
     oled_bridge_show_string_small(0,0,"BLUEPILL PID OK");
     oled_bridge_show_string_small(2,0,"Boot...");
 
@@ -312,7 +350,8 @@ int main(void)
     line_follower_set_event_cb(line_diag);
 
     /* ---- IMU ---- */
-    imu_bridge_init(0, IMU_MPU6050, &imu_i2c);
+    if (imu_bridge_init(0, &g_imu_cfg) != BRIDGE_OK)
+        Error_Handler();
     /* USER CODE END 2 */
 
     /* ---- 主循环 ---- */
@@ -337,7 +376,7 @@ int main(void)
                 if (f_len >= 2 && frame[f_len-2] == 0xFF && frame[f_len-1] == 0xFF) {
                     uint8_t cmd = frame[1], flen = f_len - 2;
                     if      (cmd == 0x01 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); speed_loop_set_target(id, v); cmd_note("M%d=%dRPM", id, (int)((v>0)?v:-v)); ack("M%d:%dRPM\r\n",id,(int)(v+0.5f)); }
-                    else if (cmd == 0x02 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); motor_bridge_set_speed_mps(id,v); cmd_note("M%d=%dcm/s", id, (int)(v*100)); ack("M%d:%dcm/s\r\n",id,(int)(v*100+0.5f)); }
+                    else if (cmd == 0x02 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); (void)motor_bridge_set_speed_mps(id,v); cmd_note("M%d=%dcm/s", id, (int)(v*100)); ack("M%d:%dcm/s\r\n",id,(int)(v*100+0.5f)); }
                     else if (cmd == 0x03 && flen >= 3 && frame[2] < 2) { uint8_t id = frame[2]; line_follower_enable(0); speed_loop_stop(id); cmd_note("BRK%d", id); ack("M%d:BRAKE\r\n",id); }
                     else if (cmd == 0x10 && flen >= 7 && frame[2] < 1) { float v; memcpy(&v,&frame[3],4); steering_set(v); float a = steering_get(); cmd_note("SV=%d.%d", (int)a, dec1(a)); ack("SV:%d.%d\r\n", (int)a, dec1(a)); }
                     else if (cmd == 0xE0 && flen >= 15 && frame[2] < 2) { uint8_t id = frame[2]; float kp,ki,kd; memcpy(&kp,&frame[3],4); memcpy(&ki,&frame[7],4); memcpy(&kd,&frame[11],4); speed_loop_set_gains(id,kp,ki,kd); cmd_note("PID%d", id); ack("OK\r\n"); }
@@ -588,10 +627,10 @@ int main(void)
              * [对未完善部分的假设] 帧格式即 B3 接入契约 v0, 改动须升版本并同步 PC 工具 */
             if (g_step_active) {
                 if (now < g_step_end) {
-                    motor_bridge_set_rate_0E3(g_step_m, g_step_rate);
+                    (void)motor_bridge_set_rate_0E3(g_step_m, g_step_rate);
                 } else {
                     g_step_active = 0;
-                    motor_bridge_brake(g_step_m);
+                    (void)motor_bridge_brake(g_step_m);
                     speed_loop_reset(g_step_m);     /* 释放 PID + 测速基准作废 */
                     ack("STEP END\r\n");
                 }
@@ -659,8 +698,8 @@ int main(void)
         if (now - t_disp >= 100) {
             t_disp = HAL_GetTick();
 
-            /* 读传感器 (IMU 事务带 10ms 超时, 可接受) */
-            imu_bridge_update_filter(0);
+            /* 读传感器 (IMU 事务带 10ms 超时, 可接受)；时间基准传入（义务 5） */
+            (void)imu_bridge_update_filter(0, now);
             float roll  = imu_bridge_get_roll(0);
             float pitch = imu_bridge_get_pitch(0);
             float yaw   = imu_bridge_get_yaw(0);

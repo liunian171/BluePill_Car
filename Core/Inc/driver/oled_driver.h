@@ -9,12 +9,21 @@
  *     行 3: page 6(上) + page 7(下)
  *
  * 汉字 16×16: 占用两行，显示在 (row, row+1)
+ *
+ * ▸ 平台依赖（C1，2026-09-13）◂
+ *   本文件与本实现**零 HAL / 零 CubeMX 依赖**：I2C 以"写事务函数"注入
+ *   （`oled_write_fn`，见 oled_platform_ops.h）；HAL 绑定在平台侧文件。
+ *   原实现硬编码 `&hi2c2` 并把 `i2c.h` 传染进器件层，已去除。
+ *
+ * ▸ 家族契约 ◂ 桥接层 `oled_bridge` 是本驱动的 C 门面（单例，见
+ *   doc/桥接层家族契约.md §2.7）。
  */
 
-#ifndef __OLED_DRIVER_H__
-#define __OLED_DRIVER_H__
+#ifndef OLED_DRIVER_H
+#define OLED_DRIVER_H
 
 #include <stdint.h>
+#include "oled_platform_ops.h"   /* oled_write_fn */
 
 #ifdef __cplusplus
 
@@ -22,8 +31,14 @@ class OledDriver {
 public:
     OledDriver();
 
-    /** @brief 初始化显示 */
-    int8_t init();
+    /**
+     * @brief 绑定平台并初始化显示
+     * @param i2c_context 平台资源（STM32 为 I2C_HandleTypeDef*）
+     * @param write       写事务函数（不得为 NULL）
+     * @param addr7       从机 7 位地址（本器件 0x3C）
+     * @retval 0 成功 / -1 参数非法
+     */
+    int8_t init(void *i2c_context, oled_write_fn write, uint8_t addr7);
 
     /** @brief 清屏 */
     void clear();
@@ -58,6 +73,11 @@ public:
     void show_line_small(uint8_t page, const char *str);
 
 private:
+    void *        ctx_   = 0;   /* 平台资源 */
+    oled_write_fn write_ = 0;   /* 写事务注入 */
+    uint8_t       addr_  = 0;   /* 从机 7 位地址 */
+
+    void write(uint8_t reg, const uint8_t *data, uint16_t len);
     void write_cmd(uint8_t cmd);
     void write_cmd_multi(const uint8_t *cmds, uint16_t len);
     void write_data(uint8_t data);
@@ -66,4 +86,4 @@ private:
 
 #endif /* __cplusplus */
 
-#endif
+#endif /* OLED_DRIVER_H */

@@ -2,25 +2,25 @@
  * @file    oled_driver.cpp
  * @brief   SSD1315 OLED 驱动实现 — 8×16 ASCII + 16×16 汉字
  *
- * @note I2C 适配说明
+ * @note I2C 适配说明（C1，2026-09-13）
  * ───────────────────────────────────────────────────────────
- * 原工程 (F427) 使用软件 I2C（useri2c.h 的 I2C_Handle + ops 表）。
- * 移植到 Bluepill 时改为直接调用 HAL_I2C_Mem_Write（硬件 I2C2）。
+ * 本文件**零 HAL / 零 CubeMX 依赖**：I2C 写事务由构造注入的
+ * `oled_write_fn` 完成，HAL 绑定在 `oled_platform_ops.c`。
  *
- * TODO: 等 i2c_hardware_ops.c 实现后，改回 useri2c.h 接口，
- *       保持 I2C 驱动框架的 ops 抽象一致性。
+ * 演进：F427 原工程用软件 I2C（useri2c ops 表）→ 移植时改为在本文件
+ *       直接调 HAL_I2C_Mem_Write + 硬编码 &hi2c2（器件层拖 HAL，且无法
+ *       换 I2C/多屏）→ 本次改为写事务注入，方向与 useri2c ops 表一致，
+ *       但只暴露 OLED 真正需要的那一个操作。
  * ───────────────────────────────────────────────────────────
  */
 
 #include "oled_driver.h"
 #include "oled_font.h"
-#include "i2c.h"            /* hi2c2 */
 
-static const uint8_t kOledAddr = 0x3C << 1;  /* HAL 需要 7bit 左移 1 位 */
-
-static void write(uint8_t reg, const uint8_t *data, uint16_t len) {
-    HAL_I2C_Mem_Write(&hi2c2, kOledAddr, reg, I2C_MEMADD_SIZE_8BIT,
-                      (uint8_t *)data, len, 100);
+/* 写事务：显示链按"尽力而为"处理，忽略返回码（错误不刷屏、不打断控制链） */
+void OledDriver::write(uint8_t reg, const uint8_t *data, uint16_t len) {
+    if (write_ == 0) return;
+    (void)write_(ctx_, addr_, reg, data, len);
 }
 
 /* ========================================================================== */
@@ -42,7 +42,12 @@ void OledDriver::set_pos(uint8_t page, uint8_t col_byte) {
 
 OledDriver::OledDriver() {}
 
-int8_t OledDriver::init() {
+int8_t OledDriver::init(void *i2c_context, oled_write_fn write_fn, uint8_t addr7) {
+    if (write_fn == 0) return -1;      /* 平台未绑定：显式失败，不静默出空屏 */
+    ctx_   = i2c_context;
+    write_ = write_fn;
+    addr_  = addr7;
+
     const uint8_t cmds[] = {
         0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00,
         0x40, 0x8D, 0x14, 0x20, 0x00, 0xA1, 0xC8,

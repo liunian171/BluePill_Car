@@ -1,14 +1,24 @@
 /**
  * @file    oled_bridge.cpp
- * @brief   OLED C 桥接实现
+ * @brief   OLED C 桥接实现（家族单例特例，见 oled_bridge.h）
  */
 
 #include "oled_bridge.h"
 #include "oled_driver.h"
+#include <stddef.h>
 
 static OledDriver g_oled;
 
-void oled_bridge_init(void)          { g_oled.init(); }
+bridge_ret_t oled_bridge_init(const oled_cfg_t *cfg)
+{
+    if (cfg == NULL)        return BRIDGE_ERR_BAD_ARG;
+    if (cfg->write == NULL) return BRIDGE_ERR_BAD_ARG;   /* 平台未绑定：显式失败 */
+
+    if (g_oled.init(cfg->i2c_context, cfg->write, cfg->addr7) != 0)
+        return BRIDGE_ERR_IO;
+
+    return BRIDGE_OK;
+}
 
 void oled_bridge_show_string(uint8_t row, uint8_t col, const char *str)
 {
