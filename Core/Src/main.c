@@ -61,8 +61,9 @@ static int          pid_kp100[2]    = {24, 24}; /* Kp×100 */
 static int          pid_ki100[2]    = {13, 13};
 static int          pid_kd100[2]    = {20, 20};
 static int16_t      rpm_disp[2]     = {0, 0};
-static int8_t       enc_fb_sign[2]  = {1, 1}; /* 编码器反馈符号(带符号测速用): M1/E2 软件取反已在底层完成, 理论同向;
-                                                * 真机验证点: 发正向 M 命令, OLED 页1 实测值应为正; 若转速飞升(正反馈)则翻转对应位 */
+static int8_t       enc_fb_sign[2]  = {1, -1}; /* 反馈符号必须镜像驱动侧: motor_bridge 对 id1 驱动取反(E2 硬件接反),
+                                                * 反馈侧不同步取反则 M1 带符号反馈与设定反号 → 正反馈飞车
+                                                * (真机实证 2026-09-13: 初版 {1,1} 时 M1 上电即持续加速, 已复现) */
 static char         s_last_cmd[20]  = "NONE";  /* 最近执行的命令 (OLED 页6 显示) */
 static char         s_last_resp[20] = "-";     /* 最近应答/回复 (OLED 页4 显示) */
 static uint32_t     t_frame         = 0;       /* 二进制帧最近字节时间戳 (超时重同步) */
