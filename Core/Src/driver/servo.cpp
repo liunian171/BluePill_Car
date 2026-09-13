@@ -27,7 +27,7 @@
  *    本文件头部原为上游驱动工程（A_board_pwm_driver_test，STM32F427）的设计草案
  *    （servo_core / ServoUART / ServoI2C / PCA9685 等，均未实现），随移植整文件复制；
  *    2026-09-11 剥离至 doc/舵机旧设计稿_归档_上游A板.md 保留备查。
- *    同日补：器件行程极限钳位、get_angle()、行程参数构造注入（原为 public 裸字段）。
+ *    同日补：器件行程极限钳位、行程参数构造注入（原为 public 裸字段）；get_angle() 因全工程零调用于 2026-09-13 删除。
  * ============================================================================
  */
 
@@ -59,10 +59,6 @@ void Servo::set_angle(float angle)
     protocol.set_position(rate_0E3);
 }
 
-float Servo::get_angle() const
-{
-    return cur_angle;
-}
 
 void Servo::start()
 {

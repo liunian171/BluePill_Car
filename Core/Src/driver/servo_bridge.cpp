@@ -35,8 +35,3 @@ void servo_bridge_start(uint8_t id)
     servo[id]->start();
 }
 
-void servo_bridge_stop(uint8_t id)
-{
-    if (id >= MAX_SERVOS || servo[id] == nullptr) return;
-    servo[id]->stop();
-}

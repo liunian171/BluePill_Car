@@ -187,25 +187,26 @@ while(1):
 - [ ] 帧加 CRC 校验（低优先级）
 
 **当前主线（2026-09-13 定序：先"数据可信 + 看得见"，再动结构）**
-- [ ] ① **P0-1 `pid.c` 抗饱和修复**（钳位后回写 `prev_output`，pid.c 内 + main.c 外层两处）← **立刻可做**
-- [ ] ② **P0-2 带符号测速**（`actual_rpm` 带符号；核对 M1/E2 软件取反后的符号约定）
-- [ ] ③ **遥测通道**（复用/启用 `firewater_send`；20Hz、可开关、默认关、不进控制路径；带宽测算见 `doc/调参工具链规划.md` §2）
-- [ ] ④ 阶跃测试命令（限幅 + 轮悬空 + 看门狗）+ PC 辨识脚本最小版 + 操作规范初版
-- [ ] ⑤ **C2 抽 `speed_loop`**（此时已有遥测曲线可做搬迁前后比对；契约含 `get_state`/`set_gains`/输出注入）
-- [ ] ⑥ 死代码清理 / 自查项 N1~N3 / C1 桥接层契约
+- [x] ① **P0-1 `pid.c` 抗饱和修复**（钳位后回写 `prev_output`）✅ `9c926c3`
+- [x] ② **P0-2 带符号测速** ✅ `9c926c3`；M1 镜像取反修正 `8f21a2d`
+- [x] ③ **遥测通道** ✅ `fa012ad`（实际实现为 **10Hz CSV 文本** `TEL 1`，**不是** FireWater 二进制帧）
+- [x] ④ 阶跃测试命令（`STEP`）+ PC 辨识脚本 + 操作规范 ✅ `fa012ad`/`778244b`/`4f8305d`；M0/M1 模型辨识完成 `4ede7bf`
+- [ ] ⑤ **C2 抽 `speed_loop`** ← **下一步**（用遥测曲线做搬迁前后比对；契约含 `get_state`/`set_gains`/输出注入）
+- [ ] ⑥ 自查项 N1~N3 / C1 桥接层契约（死代码清理 ✅ 已执行，见"代码卫生"）
 - 顺序理由：**P0 修复与 C2 搬迁范围重叠**（PID 段、测速段都在那 ~50 行里）→ 先修后搬是唯一不返工路径，详见 `doc/调参工具链规划.md` §7
 
 **舵机链收尾**（详 `doc/舵机代码结构对照分析.md` §8）
 - [ ] 示波器实测 PB8 脉宽（`SV -90`→833µs / `SV 0`→1019µs / `SV -200`→648µs）
 - [ ] 舵机物理动作目视（上电回直行位、`SV 0` 到满舵）
-- [ ] 自查项 N1~N3：`servo_bridge_stop` 死接口（随 C1）、`Servo::get_angle()` 零调用、`steering_is_init/get_lim_*` 仅 PC 桩用 → 用起来或删除
+- [x] 自查项 N1~N3 ✅ 2026-09-13：`servo_bridge_stop` 已删、`Servo::get_angle()` 已删、`steering_is_init/get_lim_*` 保留（PC 桩在用，属有用接口）
 - [ ] 桥接层家族契约批次：S5（UART 空壳）/ S6（handle 校验）/ S8（错误通道形态）/ S11（感叹号注释）——与 IMU 链、oled 归一合并定方案
 
 **代码卫生**
-- [ ] 死代码清理（清单已定，⚠️ **须逐条执行并即时校验**，见 `调试总结`/`memory` 事故记录：批量 `git rm` 曾误删 70 文件）：
-      `uart_cmd_parser.c/.h`(465行, 评审 C1) + `imu_uart_handler.cpp/.h`(174行, 唯一调用者是被删的 dispatch) + `servo_bridge_stop`(N1) + `Servo::get_angle`(N2) + `tool.h` 的 `handle_to_id`(唯一使用者是 C1)
-      ⚠️ `main.c` 的 `firewater_send()` **不在删除清单内**——它是遥测通道的现成起点，死代码 → 待启用（见"当前主线"③）
+- [x] 死代码清理 ✅ **2026-09-13 执行完毕**（4 文件 639 行 + 3 处符号）：`uart_cmd_parser.c/.h`(465) + `imu_uart_handler.cpp/.h`(174) + `servo_bridge_stop`(N1) + `Servo::get_angle`(N2) + `tool.h` 的 `handle_to_id`；附带修正 `uart.h` 引用死路径的注释
+      验证：CMake 重配置 + 编译通过（Flash 44636B/RAM 5784B，主要来自工具链新功能；**死代码本就被 `--gc-sections` 剔除，故删它不省 Flash，省的是认知成本**）；PC 桩回归 txt_cmd 77/77 + steering 33/33
+      判定与纪律已固化：`doc/代码风格与模块衔接指南.md` §7（死代码 vs 预留代码的区分、三条判据、删除纪律）
 - [ ] 有意预留项加显式标注（**勿删**）：`useri2c.c/.h`+`useri2c_ops.c/.h`（软 I2C，本工程用硬件 I2C2）、`pwm.h` 的 `PWM_Ch_State`/`Ch_State`/`TIM_PWM_g_Param`
+- [ ] `main.c` 的 `firewater_send()`（20 行）**保留但属"预留未启用"**：遥测实际走 10Hz CSV（`g_tel_on`），该 FireWater 二进制帧至今零调用；**启用条件**=需 >10Hz 带宽或 VOFA+ 波形时启用，**否则按死代码删除**（判据见指南 §7）
 
 **闭环参与**（⬇️ 已降级：用户 2026-09-11 决定巡线暂不使用、结构保留）
 - [ ] `steering` 接入巡线 `corr → 转向`（**非当前路径**）；`steering` 目前维持"命令驱动的舵机"

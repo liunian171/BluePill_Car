@@ -55,7 +55,6 @@ public:
     ~Servo();
 
     void  set_angle(float angle);   /* 物理角(°) → 器件行程钳位 → 千分比 → 协议层 */
-    float get_angle() const;        /* 最近一次实际输出角(°)，钳位后 */
     void  start();
     void  stop();
 

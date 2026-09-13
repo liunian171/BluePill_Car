@@ -16,4 +16,3 @@ int map(int x, int in_min, int in_max, int out_min, int out_max)
         }
     }
 
-// handle_to_id 已在 tool.h 中定义为 static inline

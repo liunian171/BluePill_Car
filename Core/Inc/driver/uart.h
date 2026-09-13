@@ -115,7 +115,7 @@ int8_t uart_receive(UART_Handle *hUART, uint8_t *data, uint16_t len);
  * @param p_byte 存放收到字节的地址（指向 hUART->rx_byte）
  * @note  回调中必须重新调用本函数使能下一个字节，否则只收到一个。
  *        接收到的字节走 HAL_UART_RxCpltCallback → ringbuf_write →
- *        uart_cmd_parser_tick 路径，最终在 cmd_dispatch 中消费。
+ *        main.c 主循环「while 清空 ringbuf」后当场解析（原 uart_cmd_parser 死代码已于 2026-09-13 删除）。
  * @retval 0 成功  -1 HAL 错误
  */
 int8_t uart_receive_IT(UART_Handle *hUART, uint8_t *p_byte);
