@@ -59,8 +59,11 @@ typedef enum {
     TXTCMD_SERVO_LIM,   /* i0: 0=SL左限 1=SR右限 2=SC中位修正, f0=值 */
 
     /* ---- 调参工具链 (可开关, 默认关) ---- */
-    TXTCMD_STEP,        /* i0=id(0/1), i1=rate_0E3(±1000), i2=时长ms — 开环阶跃测试 */
+    TXTCMD_STEP,        /* i0=id(0/1), i1=rate_0E3(±1000), i2=时长ms, i3=遥测分频 — 开环阶跃测试 */
     TXTCMD_TEL,         /* i0=0/1 — 闭环遥测开关 (10Hz CSV) */
+    TXTCMD_FF,          /* i0=前馈系数×100 (0~500, 辨识值 1/K≈100) — 速度环前馈在线整定 */
+    TXTCMD_REC,         /* i0=0/1 — 机内记录开关 (20Hz 写 RAM, 对抗无线丢行) */
+    TXTCMD_DUMP,        /* 无参数 — 重放机内记录 (与 TEL 同格式, 可重复执行补全) */
 } TxtCmdType;
 
 typedef struct {

@@ -57,9 +57,9 @@ static float        spd_target[2]   = {0, 0};
 static int8_t       spd_dir[2]      = {1, 1};
 static int32_t      spd_prev_enc[2] = {0, 0};
 static uint32_t     spd_prev_tick[2]= {0, 0};
-static int          pid_kp100[2]    = {24, 24}; /* Kp×100 */
-static int          pid_ki100[2]    = {13, 13};
-static int          pid_kd100[2]    = {20, 20};
+static int          pid_kp100[2]    = {87, 87};  /* Kp×100 (SIMC 辨识值 2026-09-13, 见 tools/step_ident.py) */
+static int          pid_ki100[2]    = {40, 40};  /* Ki×100 (每帧积分系数×100) */
+static int          pid_kd100[2]    = {0, 0};    /* Kd×100 (一阶对象无需 D 项) */
 static int16_t      rpm_disp[2]     = {0, 0};
 static int8_t       enc_fb_sign[2]  = {1, -1}; /* 反馈符号必须镜像驱动侧: motor_bridge 对 id1 驱动取反(E2 硬件接反),
                                                 * 反馈侧不同步取反则 M1 带符号反馈与设定反号 → 正反馈飞车
@@ -77,6 +77,16 @@ static uint32_t     g_step_end      = 0;       /* 阶跃结束 tick */
 static int32_t      g_step_prev_enc = 0;
 static uint32_t     g_step_prev_tick= 0;
 static uint8_t      g_step_first    = 1;       /* 首帧测速基准初始化标志 */
+static float        g_ff_gain       = 1.0f;    /* 速度环前馈系数 (FF 命令在线整定; 辨识值 1/K≈1.0,
+                                                * 2026-09-13 M0 阶跃辨识, 见 tools/step_ident.py) */
+
+/* 机内记录: 20Hz 写 RAM, DUMP 重放 — 对抗无线链路丢行 (丢行可重试补全) */
+#define REC_MAX 128
+static uint8_t      g_rec_on        = 0;
+static uint16_t     g_rec_cnt       = 0;
+static uint32_t     rec_tick[REC_MAX];
+static int16_t      rec_t0[REC_MAX], rec_r0[REC_MAX];
+static int16_t      rec_t1[REC_MAX], rec_r1[REC_MAX];
 static uint8_t      g_step_div      = 1;       /* 遥测分频: 1=20Hz 2=10Hz (弱链路降频防丢行) */
 static uint8_t      g_step_cnt      = 0;       /* 遥测分频计数 */
 static uint8_t      g_tel_on        = 0;       /* 闭环遥测开关 (10Hz CSV, 阻塞发送, 仅整定会话开启) */
@@ -243,8 +253,9 @@ int main(void)
     motor_bridge_init(0, &pwm_tim1_ch1, &motor_a_in1, &motor_a_in2, NULL, 319.0f, 32.5f);
     motor_bridge_init(1, &pwm_tim1_ch2, &motor_b_in1, &motor_b_in2, NULL, 319.0f, 32.5f);
 
-    /* ---- PID 速度闭环 ---- */
-    PID_Params_t spd_param = { .kp=0.24f, .ki=0.13f, .kd=0.0f,
+    /* ---- PID 速度闭环 (参数 = SIMC 辨识建议[平衡]档, 2026-09-13 阶跃辨识,
+     *      A/B 实测验证: 上升 90% 150ms/零超调 vs 旧参 >3s; 详见 tools/step_ident.py) ---- */
+    PID_Params_t spd_param = { .kp=0.87f, .ki=0.40f, .kd=0.0f,
                                .out_min=-319.0f, .out_max=319.0f, .integral_limit=60.0f };
     pid_init(&pid_spd[0], PID_MODE_INCREMENTAL, &spd_param);
     pid_init(&pid_spd[1], PID_MODE_INCREMENTAL, &spd_param);
@@ -324,8 +335,8 @@ int main(void)
                         line_follower_enable(0);
                         line_follower_set_auto(0);
                         steering_center();  /* 前轮回直行位 (实测 -90, 非 0) */
-                        /* 调参工具链随急停关闭 (阶跃测试中途=安全终止, 遥测回默认关) */
-                        g_step_active = 0; g_tel_on = 0;
+                        /* 调参工具链随急停关闭 (阶跃测试中途=安全终止, 遥测/记录回默认关) */
+                        g_step_active = 0; g_tel_on = 0; g_rec_on = 0;
                         cmd_note("STOP ALL");
                         ack("STOP OK LINE OFF\r\n");
                         break;
@@ -489,6 +500,36 @@ int main(void)
                         cmd_note("TEL %d", g_tel_on);
                         ack("TEL:%d\r\n", g_tel_on);
                         break;
+                    case TXTCMD_FF:
+                        if (tc.i0 < 0 || tc.i0 > 500) { ack("FF BAD\r\n"); cmd_note("FF BAD"); break; }
+                        g_ff_gain = tc.i0 / 100.0f;
+                        cmd_note("FF %d", tc.i0);
+                        ack("FF:%d.%02d\r\n", tc.i0 / 100, tc.i0 % 100);
+                        break;
+                    case TXTCMD_REC:
+                        g_rec_on = tc.i0 ? 1 : 0;
+                        if (g_rec_on) g_rec_cnt = 0;   /* 开启即清空缓冲 */
+                        cmd_note("REC %d", g_rec_on);
+                        ack("REC:%d\r\n", g_rec_on);
+                        break;
+                    case TXTCMD_DUMP: {
+                        /* 重放机内记录: 首行报条数, 末行报结束 — PC 端按条数校验补全
+                         * [已知限制] 逐行 20ms 匀速发送 (~1.3s 阻塞主循环) — 爆发式连发会
+                         * 触发 BT04 FIFO 溢出丢行 (实测 9:1), 换 DMA 后可移除延时 */
+                        g_rec_on = 0;
+                        ack("DUMP %d\r\n", g_rec_cnt);
+                        for (uint16_t i = 0; i < g_rec_cnt; i++) {
+                            char tb[44];
+                            int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d\r\n",
+                                              (unsigned long)rec_tick[i],
+                                              rec_t0[i], rec_r0[i], rec_t1[i], rec_r1[i]);
+                            if (tn > 0) tx_raw(tb, tn);
+                            HAL_Delay(20);
+                        }
+                        ack("DUMP END\r\n");
+                        cmd_note("DUMP");
+                        break;
+                    }
                     default:
                         break;
                     }
@@ -582,7 +623,7 @@ int main(void)
 
                 /* 带符号目标 + 带符号前馈: PID 直接工作在带符号转速域, 方向由符号统一表达 */
                 float set_rpm = spd_target[m] * (float)spd_dir[m];
-                float ff = set_rpm * 0.3f;  /* 前馈: 目标转速直接作为基础输出, PID 只做修正 */
+                float ff = set_rpm * g_ff_gain;  /* 前馈: FF 命令在线整定, 理论值 1/K≈1.0 */
                 pid_spd[m].params.out_min = -319.0f;
                 pid_spd[m].params.out_max = 319.0f;
                 float pid_out = pid_update(&pid_spd[m], set_rpm, actual_rpm, dt) + ff;
@@ -605,14 +646,27 @@ int main(void)
                                   (int)spd_target[1] * spd_dir[1], (int)rpm_disp[1]);
                 if (tn > 0) tx_raw(tb, tn);
             }
+
+            /* ═══ 调参工具链: 机内记录 (20Hz 写 RAM, DUMP 重放) — 对抗无线丢行 ═══ */
+            if (g_rec_on && g_rec_cnt < REC_MAX) {
+                rec_tick[g_rec_cnt] = now;
+                rec_t0[g_rec_cnt] = (int16_t)(spd_target[0] * spd_dir[0]);
+                rec_r0[g_rec_cnt] = rpm_disp[0];
+                rec_t1[g_rec_cnt] = (int16_t)(spd_target[1] * spd_dir[1]);
+                rec_r1[g_rec_cnt] = rpm_disp[1];
+                g_rec_cnt++;
+            }
             } /* 正常闭环控制 else 段结束 */
         }
 
-        /* ③ 每 100ms 刷新显示 + 传感器 */
+        /* ③ 每 100ms 刷新显示 + 传感器
+         * [OLED 分页轮转] 每 100ms 只刷 1 页 (8 页 800ms 轮完) — I2C2 异常时每页
+         * ~10ms 超时, 8 页连刷曾阻塞主循环 ~850ms/圈 → 控制环掉到 1Hz (2026-09-13
+         * 调参实验实测踩坑, 见调试总结 §14 优化方向); 分页后最坏阻塞 ≤1 页 */
         if (now - t_disp >= 100) {
             t_disp = HAL_GetTick();
 
-            /* 读传感器 */
+            /* 读传感器 (IMU 事务带 10ms 超时, 可接受) */
             imu_bridge_update_filter(0);
             float roll  = imu_bridge_get_roll(0);
             float pitch = imu_bridge_get_pitch(0);
@@ -629,51 +683,55 @@ int main(void)
             /* IMU 校准完成后自动启动寻迹 */
             line_follower_try_auto_start(prog >= 100, now);
 
-            /* OLED 刷新（6x8 小字体, 整行单事务写入; 定宽补齐无残留, 免清屏） */
+            /* OLED 分页轮转: 单页单事务写入, 定宽补齐无残留, 免清屏 */
             char b[26];
-            /* 页0: IMU 欧拉角 */
-            snprintf(b,26,"R:%d.%d P:%d.%d Y:%d.%d",ri,rd,pi,pd,yi,yd);
-            oled_line(0,b);
-            /* 页1: PID 速度 实际->目标 */
-            snprintf(b,26,"M0:%d->%d  M1:%d->%d",
-                     rpm_disp[0],(int)spd_target[0],rpm_disp[1],(int)spd_target[1]);
-            oled_line(1,b);
-            /* 页2: 编码器计数（标定转弯/直行距离用） */
-            snprintf(b,26,"ENC0:%d  ENC1:%d",
-                     (int)enc1, (int)enc2);
-            oled_line(2,b);
-            /* 页3: 灰度 + IMU 状态 */
-            uint8_t g1=HAL_GPIO_ReadPin(OUT1_GPIO_Port,OUT1_Pin);
-            uint8_t g2=HAL_GPIO_ReadPin(OUT2_GPIO_Port,OUT2_Pin);
-            uint8_t g3=HAL_GPIO_ReadPin(OUT3_GPIO_Port,OUT3_Pin);
-            uint8_t g4=HAL_GPIO_ReadPin(OUT4_GPIO_Port,OUT4_Pin);
-            uint8_t g5=HAL_GPIO_ReadPin(OUT5_GPIO_Port,OUT5_Pin);
-            snprintf(b,26,"G:%d%d%d%d%d  %s",
-                     g1?1:0,g2?1:0,g3?1:0,g4?1:0,g5?1:0, (prog<100)?"CAL":"OK");
-            oled_line(3,b);
-            /* 页4: 最近应答 (指令接收后的回复, 无线调试确认) */
-            snprintf(b,26,"RSP:%-17s", s_last_resp);
-            oled_line(4,b);
-            /* 页5: PID 参数 M0/M1 (合并一行, 腾出命令显示页) */
-            snprintf(b,26,"P%d,%d I%d,%d D%d,%d",
-                     pid_kp100[0], pid_kp100[1],
-                     pid_ki100[0], pid_ki100[1],
-                     pid_kd100[0], pid_kd100[1]);
-            oled_line(5,b);
-            /* 页6: 最近执行的命令 (无线命令执行确认) */
-            snprintf(b,26,"CMD:%-16s", s_last_cmd);
-            oled_line(6,b);
-            /* 页7: 寻迹 + 校准 + 转弯状态 */
-            if (prog < 100) {
-                snprintf(b,26,"CAL:%d%%  AUTO:%d", prog, line_follower_auto());
-            } else if (!line_follower_enabled()) {
-                snprintf(b,26,"LINE:OFF SPD:%d", (int)line_follower_base_spd());
-            } else {
-                const char *st[] = {"FOLLOW","?","TURNING","EXIT","SEARCH"};
-                uint8_t ls = line_follower_state();
-                snprintf(b,26,"LINE %s SPD:%d", st[ls>4?0:ls], (int)line_follower_base_spd());
+            static uint8_t s_disp_page = 0;
+            switch (s_disp_page) {
+            case 0: /* IMU 欧拉角 */
+                snprintf(b,26,"R:%d.%d P:%d.%d Y:%d.%d",ri,rd,pi,pd,yi,yd);
+                oled_line(0,b); break;
+            case 1: /* PID 速度 实际->目标 */
+                snprintf(b,26,"M0:%d->%d  M1:%d->%d",
+                         rpm_disp[0],(int)spd_target[0],rpm_disp[1],(int)spd_target[1]);
+                oled_line(1,b); break;
+            case 2: /* 编码器计数（标定转弯/直行距离用） */
+                snprintf(b,26,"ENC0:%d  ENC1:%d", (int)enc1, (int)enc2);
+                oled_line(2,b); break;
+            case 3: { /* 灰度 + IMU 状态 */
+                uint8_t g1=HAL_GPIO_ReadPin(OUT1_GPIO_Port,OUT1_Pin);
+                uint8_t g2=HAL_GPIO_ReadPin(OUT2_GPIO_Port,OUT2_Pin);
+                uint8_t g3=HAL_GPIO_ReadPin(OUT3_GPIO_Port,OUT3_Pin);
+                uint8_t g4=HAL_GPIO_ReadPin(OUT4_GPIO_Port,OUT4_Pin);
+                uint8_t g5=HAL_GPIO_ReadPin(OUT5_GPIO_Port,OUT5_Pin);
+                snprintf(b,26,"G:%d%d%d%d%d  %s",
+                         g1?1:0,g2?1:0,g3?1:0,g4?1:0,g5?1:0, (prog<100)?"CAL":"OK");
+                oled_line(3,b); break;
             }
-            oled_line(7,b);
+            case 4: /* 最近应答 (指令接收后的回复, 无线调试确认) */
+                snprintf(b,26,"RSP:%-17s", s_last_resp);
+                oled_line(4,b); break;
+            case 5: /* PID 参数 M0/M1 (合并一行, 腾出命令显示页) */
+                snprintf(b,26,"P%d,%d I%d,%d D%d,%d",
+                         pid_kp100[0], pid_kp100[1],
+                         pid_ki100[0], pid_ki100[1],
+                         pid_kd100[0], pid_kd100[1]);
+                oled_line(5,b); break;
+            case 6: /* 最近执行的命令 (无线命令执行确认) */
+                snprintf(b,26,"CMD:%-16s", s_last_cmd);
+                oled_line(6,b); break;
+            default: /* 页7: 寻迹 + 校准 + 转弯状态 */
+                if (prog < 100) {
+                    snprintf(b,26,"CAL:%d%%  AUTO:%d", prog, line_follower_auto());
+                } else if (!line_follower_enabled()) {
+                    snprintf(b,26,"LINE:OFF SPD:%d", (int)line_follower_base_spd());
+                } else {
+                    const char *st[] = {"FOLLOW","?","TURNING","EXIT","SEARCH"};
+                    uint8_t ls = line_follower_state();
+                    snprintf(b,26,"LINE %s SPD:%d", st[ls>4?0:ls], (int)line_follower_base_spd());
+                }
+                oled_line(7,b); break;
+            }
+            s_disp_page = (s_disp_page + 1) & 7;
         }
     }
 }

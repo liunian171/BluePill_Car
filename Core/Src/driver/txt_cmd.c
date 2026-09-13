@@ -124,6 +124,33 @@ int txt_cmd_parse(const char *s, TxtCmd *o)
         return 1;
     }
 
+    /* ---- FF <val100> (调参: 速度环前馈系数 x100) ----
+     * 辨识值 1/K ≈ 100 (2026-09-13 M0 阶跃辨识, 见 tools/step_ident.py) */
+    if (strncmp(p, "FF", 2) == 0) {
+        const char *q = p + 2;
+        int v;
+        if (!parse_int(&q, &v)) return 0;
+        o->type = TXTCMD_FF;
+        o->i0 = v;
+        return 1;
+    }
+
+    /* ---- REC 0/1 (调参: 机内记录开关, 20Hz 写 RAM) ---- */
+    if (strncmp(p, "REC", 3) == 0) {
+        const char *q = p + 3;
+        int en;
+        if (!parse_int(&q, &en)) return 0;
+        o->type = TXTCMD_REC;
+        o->i0 = en;
+        return 1;
+    }
+
+    /* ---- DUMP (调参: 重放机内记录, 无参数) ---- */
+    if (strcmp(p, "DUMP") == 0) {
+        o->type = TXTCMD_DUMP;
+        return 1;
+    }
+
     /* ---- MS <rpm> (双电机同步, 必须先于 M0/M1 判定? 无冲突, 位置任意) ---- */
     if (p[0] == 'M' && p[1] == 'S' && p[2] == ' ') {
         const char *q = p + 2;

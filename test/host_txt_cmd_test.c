@@ -129,6 +129,13 @@ int main(void)
     check(txt_cmd_parse("TEL 0", &tc) && tc.type == TXTCMD_TEL && tc.i0 == 0, "TEL 0");
     check(!txt_cmd_parse("TEL", &tc),                         "TEL 无参数 -> 拒绝");
     check(!txt_cmd_parse("TELA 1", &tc),                      "TELA 仍拒绝");
+    check(txt_cmd_parse("FF 100", &tc) && tc.type == TXTCMD_FF && tc.i0 == 100, "FF 100 (辨识值)");
+    check(txt_cmd_parse("FF 30", &tc) && tc.type == TXTCMD_FF && tc.i0 == 30,   "FF 30 (旧值)");
+    check(!txt_cmd_parse("FF", &tc),                          "FF 无参数 -> 拒绝");
+    check(txt_cmd_parse("REC 1", &tc) && tc.type == TXTCMD_REC && tc.i0 == 1, "REC 1");
+    check(txt_cmd_parse("REC 0", &tc) && tc.type == TXTCMD_REC && tc.i0 == 0, "REC 0");
+    check(txt_cmd_parse("DUMP", &tc) && tc.type == TXTCMD_DUMP, "DUMP");
+    check(!txt_cmd_parse("RECA 1", &tc),                      "RECA 仍拒绝");
 
     /* ---- 兜底 ---- */
     check(!txt_cmd_parse("", &tc),                            "空串 -> 拒绝");
