@@ -61,6 +61,8 @@ static int          pid_kp100[2]    = {24, 24}; /* Kp×100 */
 static int          pid_ki100[2]    = {13, 13};
 static int          pid_kd100[2]    = {20, 20};
 static int16_t      rpm_disp[2]     = {0, 0};
+static int8_t       enc_fb_sign[2]  = {1, 1}; /* 编码器反馈符号(带符号测速用): M1/E2 软件取反已在底层完成, 理论同向;
+                                                * 真机验证点: 发正向 M 命令, OLED 页1 实测值应为正; 若转速飞升(正反馈)则翻转对应位 */
 static char         s_last_cmd[20]  = "NONE";  /* 最近执行的命令 (OLED 页6 显示) */
 static char         s_last_resp[20] = "-";     /* 最近应答/回复 (OLED 页4 显示) */
 static uint32_t     t_frame         = 0;       /* 二进制帧最近字节时间戳 (超时重同步) */
@@ -487,20 +489,22 @@ int main(void)
                 int32_t delta = (int32_t)enc - (int32_t)spd_prev_enc[m];
                 if (delta >  30000) delta -= 65536;
                 if (delta < -30000) delta += 65536;
-                int32_t abs_delta = (delta < 0) ? -delta : delta;
+                /* 带符号测速 (P0-2): 反馈保留方向 — 车轮短暂倒转时 PID 能正确纠错,
+                 * 旧版取 |ΔN| 会把倒转误读为正转(正反馈风险) */
                 uint16_t ppr = (m == 0) ? henc1.ppr : henc2.ppr;
-                float actual_rpm = (float)abs_delta * 60.0f / (dt * (float)ppr);
+                float actual_rpm = (float)delta * 60.0f / (dt * (float)ppr) * (float)enc_fb_sign[m];
 
-                /* 前馈: 目标转速直接作为基础输出，PID 只做修正 */
-                float ff = spd_target[m] * 0.3f;  /* 前馈系数 0.3 */
+                /* 带符号目标 + 带符号前馈: PID 直接工作在带符号转速域, 方向由符号统一表达 */
+                float set_rpm = spd_target[m] * (float)spd_dir[m];
+                float ff = set_rpm * 0.3f;  /* 前馈: 目标转速直接作为基础输出, PID 只做修正 */
                 pid_spd[m].params.out_min = -319.0f;
                 pid_spd[m].params.out_max = 319.0f;
-                float pid_out = pid_update(&pid_spd[m], spd_target[m], actual_rpm, dt) + ff;
-                if (pid_out < 0.0f) pid_out = 0.0f;
-                if (pid_out > 319.0f) pid_out = 319.0f;
+                float pid_out = pid_update(&pid_spd[m], set_rpm, actual_rpm, dt) + ff;
+                if (pid_out < -319.0f) pid_out = -319.0f;
+                if (pid_out >  319.0f) pid_out = 319.0f;
 
-                motor_bridge_set_speed_rpm(m, pid_out * spd_dir[m]);
-                rpm_disp[m] = (int16_t)(actual_rpm + 0.5f);
+                motor_bridge_set_speed_rpm(m, pid_out);
+                rpm_disp[m] = (int16_t)((actual_rpm >= 0) ? (actual_rpm + 0.5f) : (actual_rpm - 0.5f));
                 spd_prev_enc[m] = enc; spd_prev_tick[m] = now;
             }
         }

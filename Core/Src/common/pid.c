@@ -80,13 +80,17 @@ static float pid_incremental(PID_Handle *pid, float setpoint, float measurement,
     /* 新输出 = 旧输出 + 增量 */
     float output = pid->state.prev_output + delta;
 
-    /* 保存历史 */
+    /* 输出限幅（必须先钳位再保存历史 — clamping anti-windup：
+     * 若把未钳位值存入 prev_output，长时间大误差下内部输出无界累积（积分饱和），
+     * 误差反向后需长时间"消化"才能退出限幅 → 超调/响应迟钝） */
+    output = CLAMP(output, pid->params.out_min, pid->params.out_max);
+
+    /* 保存历史（存钳位后的值） */
     pid->state.prev_measurement = pid->state.prev_error;
     pid->state.prev_error       = error;
     pid->state.prev_output      = output;
 
-    /* 输出限幅 */
-    return CLAMP(output, pid->params.out_min, pid->params.out_max);
+    return output;
 }
 
 /* ============================================================================
