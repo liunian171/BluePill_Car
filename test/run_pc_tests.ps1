@@ -29,5 +29,13 @@ if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
 if ($LASTEXITCODE -ne 0) { $failed++ }
 
 Write-Host ""
+Write-Host "== 编译+运行: speed_loop 执行组件测试桩 =="
+& $gcc -Wall -Wextra @incs -o build/pc_test_speed_loop.exe `
+    test/host_speed_loop_test.c Core/Src/driver/speed_loop.c Core/Src/common/pid.c
+if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
+& build\pc_test_speed_loop.exe
+if ($LASTEXITCODE -ne 0) { $failed++ }
+
+Write-Host ""
 if ($failed -eq 0) { Write-Host "== 全部测试桩通过 ==" } else { Write-Host "== 有 $failed 组测试失败 ==" }
 exit $failed

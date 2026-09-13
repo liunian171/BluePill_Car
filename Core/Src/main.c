@@ -26,8 +26,8 @@
 #include "driver/txt_cmd.h"
 #include "driver/servo_bridge.h"
 #include "driver/steering.h"
+#include "driver/speed_loop.h"
 #include "common/ringbuf.h"
-#include "common/pid.h"
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -51,21 +51,36 @@ static I2C_Handle imu_i2c = {
     .ops         = &i2c_hardware_platform_ops_stm32,
 };
 
-/* PID 速度闭环 */
-static PID_Handle   pid_spd[2];
-static float        spd_target[2]   = {0, 0};
-static int8_t       spd_dir[2]      = {1, 1};
-static int32_t      spd_prev_enc[2] = {0, 0};
-static uint32_t     spd_prev_tick[2]= {0, 0};
-static int          pid_kp100[2]    = {87, 87};  /* Kp×100 (SIMC 辨识值 2026-09-13, 见 tools/step_ident.py) */
-static int          pid_ki100[2]    = {40, 40};  /* Ki×100 (每帧积分系数×100) */
-static int          pid_kd100[2]    = {0, 0};    /* Kd×100 (一阶对象无需 D 项) */
-static int16_t      rpm_disp[2]     = {0, 0};
-static int8_t       enc_fb_sign[2]  = {1, -1}; /* 反馈符号必须镜像驱动侧: motor_bridge 对 id1 驱动取反(E2 硬件接反),
-                                                * 反馈侧不同步取反则 M1 带符号反馈与设定反号 → 正反馈飞车
-                                                * (真机实证 2026-09-13: 初版 {1,1} 时 M1 上电即持续加速, 已复现) */
-static char         s_last_cmd[20]  = "NONE";  /* 最近执行的命令 (OLED 页6 显示) */
-static char         s_last_resp[20] = "-";     /* 最近应答/回复 (OLED 页4 显示) */
+/* ==== 速度环执行组件 (speed_loop) 的标定表 —— 组装层只留"配置 + 接线" ====
+ * PID / 前馈 / 测速 / 限幅 / 停车语义 / 状态保持 已全部归位到组件内部（C2, 2026-09-13）。
+ * 下列数值为"车知识/硬件知识"，全部经本表注入；换车/换电机只改本表，不改组件。
+ *   ppr        : 编码器每转脉冲数（init 时用 henc 实测值覆盖，此处为缺省回退）
+ *   enc_span   : 16 位定时器计数模值（回绕校正用）；换 32 位编码器置 0
+ *   fb_sign    : 反馈符号，必须镜像驱动侧取反（E2 硬件接反 → id1 = -1）
+ *   ff_gain    : 前馈系数（FF 命令在线整定，辨识值 1/K ≈ 1.0）
+ *   out ±319   : 输出限幅 = 电机 max_rpm 实测
+ *   kp/ki/kd   : SIMC 阶跃辨识值（2026-09-13，见 tools/step_ident.py） */
+static speed_loop_cfg_t g_spd_cfg = {
+    .ch_count = 2,
+    .ch = {
+        /* id0 (MOTOR A, E1 同向) */
+        { .ppr = 1466.0f, .enc_span = 65536, .fb_sign =  1,
+          .ff_gain = 1.0f, .out_min = -319.0f, .out_max = 319.0f,
+          .kp = 0.87f, .ki = 0.40f, .kd = 0.0f },
+        /* id1 (MOTOR B, E2 硬件接反 → 反馈同号取反) */
+        { .ppr = 1466.0f, .enc_span = 65536, .fb_sign = -1,
+          .ff_gain = 1.0f, .out_min = -319.0f, .out_max = 319.0f,
+          .kp = 0.87f, .ki = 0.40f, .kd = 0.0f },
+    }
+};
+
+/* ==== 决策组件的输出缓冲（巡线写意图 → 组装层推给执行组件）====
+ * 与执行组件解耦：巡线仍按"目标幅值 + 方向"两数组接口输出（结构保留不动），
+ * 组装层负责合成带符号目标；巡线未启用时该缓冲不参与（命令下发的意图保持不变）。 */
+static float        g_lf_tgt[2]     = {0.0f, 0.0f};
+static int8_t       g_lf_dir[2]     = {0, 0};
+
+static char         s_last_cmd[20]  = "NONE";  /* 最近执行的命令 (OLED 页6 显示) */static char         s_last_resp[20] = "-";     /* 最近应答/回复 (OLED 页4 显示) */
 static uint32_t     t_frame         = 0;       /* 二进制帧最近字节时间戳 (超时重同步) */
 
 /* ==== 调参工具链 (工程支持层, 可开关, 默认关 — STOP 急停自动关闭) ==== */
@@ -74,11 +89,8 @@ static uint8_t      g_step_m        = 0;       /* 测试电机 id */
 static int16_t      g_step_rate     = 0;       /* 阶跃千分比 (±1000) */
 static uint32_t     g_step_t0       = 0;       /* 阶跃起始 tick (遥测 t 基准) */
 static uint32_t     g_step_end      = 0;       /* 阶跃结束 tick */
-static int32_t      g_step_prev_enc = 0;
-static uint32_t     g_step_prev_tick= 0;
-static uint8_t      g_step_first    = 1;       /* 首帧测速基准初始化标志 */
-static float        g_ff_gain       = 1.0f;    /* 速度环前馈系数 (FF 命令在线整定; 辨识值 1/K≈1.0,
-                                                * 2026-09-13 M0 阶跃辨识, 见 tools/step_ident.py) */
+static uint8_t      g_step_first    = 1;       /* 首帧测速基准初始化标志 (建基准并丢弃该帧) */
+/* 注: 阶跃测速基准/前馈系数已归位到 speed_loop 组件（原 g_step_prev_enc/tick、g_ff_gain）*/
 
 /* 机内记录: 20Hz 写 RAM, DUMP 重放 — 对抗无线链路丢行 (丢行可重试补全) */
 #define REC_MAX 128
@@ -117,6 +129,25 @@ static void firewater_send(float *data, uint8_t n)
     for (uint8_t i = 2; i < 2 + len; i++) sum += buf[i];
     buf[4 + n*4] = sum;
     HAL_UART_Transmit(&huart2, buf, 5 + n*4, 100);
+}
+
+/* ==== 速度环组件的 IO 绑定（组装层职责：把组件接口接到器件/传感器）====
+ * 组件只持函数指针（不 include 桥接层头），故执行栈向上不反向依赖。
+ * 换驱动芯片 / 换编码器接口只改这三个绑定，组件与上层不动。 */
+static void spd_io_set_rpm(uint8_t id, float rpm) { motor_bridge_set_speed_rpm(id, rpm); }
+static void spd_io_brake  (uint8_t id)            { motor_bridge_brake(id); }
+static int32_t spd_io_read_enc(uint8_t id)        { return (id == 0) ? encoder_get_count(&henc1)
+                                                                      : encoder_get_count(&henc2); }
+static const speed_loop_io_t g_spd_io = {
+    .set_rpm  = spd_io_set_rpm,
+    .brake    = spd_io_brake,
+    .read_enc = spd_io_read_enc,
+};
+
+/* 状态读出小工具: 带符号浮点 → 四舍五入到 int（遥测/显示共用，避免各处重复写） */
+static int spd_to_int(float v)
+{
+    return (int)((v >= 0.0f) ? (v + 0.5f) : (v - 0.5f));
 }
 
 /* 中断回调 */
@@ -253,12 +284,13 @@ int main(void)
     motor_bridge_init(0, &pwm_tim1_ch1, &motor_a_in1, &motor_a_in2, NULL, 319.0f, 32.5f);
     motor_bridge_init(1, &pwm_tim1_ch2, &motor_b_in1, &motor_b_in2, NULL, 319.0f, 32.5f);
 
-    /* ---- PID 速度闭环 (参数 = SIMC 辨识建议[平衡]档, 2026-09-13 阶跃辨识,
-     *      A/B 实测验证: 上升 90% 150ms/零超调 vs 旧参 >3s; 详见 tools/step_ident.py) ---- */
-    PID_Params_t spd_param = { .kp=0.87f, .ki=0.40f, .kd=0.0f,
-                               .out_min=-319.0f, .out_max=319.0f, .integral_limit=60.0f };
-    pid_init(&pid_spd[0], PID_MODE_INCREMENTAL, &spd_param);
-    pid_init(&pid_spd[1], PID_MODE_INCREMENTAL, &spd_param);
+    /* ---- 速度环执行组件 (参数 = SIMC 辨识建议[平衡]档, 2026-09-13 阶跃辨识,
+     *      A/B 实测验证: 上升 90% 150ms/零超调 vs 旧参 >3s; 详见 tools/step_ident.py) ----
+     * ppr 一律以编码器实测值为准（单一数据源），标定表里的字面量只作缺省回退 */
+    g_spd_cfg.ch[0].ppr = (float)henc1.ppr;
+    g_spd_cfg.ch[1].ppr = (float)henc2.ppr;
+    if (speed_loop_init(&g_spd_cfg, &g_spd_io) != SPEED_LOOP_OK)
+        Error_Handler();
 
     /* ---- 舵机 50Hz ---- */
     pwm_set_freq(&pwm_tim4_ch3, 50); pwm_start(&pwm_tim4_ch3);
@@ -304,11 +336,11 @@ int main(void)
                 t_frame = HAL_GetTick();
                 if (f_len >= 2 && frame[f_len-2] == 0xFF && frame[f_len-1] == 0xFF) {
                     uint8_t cmd = frame[1], flen = f_len - 2;
-                    if      (cmd == 0x01 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); spd_target[id] = (v>0)?v:(-v); spd_dir[id] = (v>=0)?1:-1; cmd_note("M%d=%dRPM", id, (int)(v>0?v:-v)); ack("M%d:%dRPM\r\n",id,(int)(v+0.5f)); }
+                    if      (cmd == 0x01 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); speed_loop_set_target(id, v); cmd_note("M%d=%dRPM", id, (int)((v>0)?v:-v)); ack("M%d:%dRPM\r\n",id,(int)(v+0.5f)); }
                     else if (cmd == 0x02 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); motor_bridge_set_speed_mps(id,v); cmd_note("M%d=%dcm/s", id, (int)(v*100)); ack("M%d:%dcm/s\r\n",id,(int)(v*100+0.5f)); }
-                    else if (cmd == 0x03 && flen >= 3 && frame[2] < 2) { uint8_t id = frame[2]; line_follower_enable(0); spd_target[id]=0; pid_reset(&pid_spd[id]); motor_bridge_brake(id); cmd_note("BRK%d", id); ack("M%d:BRAKE\r\n",id); }
+                    else if (cmd == 0x03 && flen >= 3 && frame[2] < 2) { uint8_t id = frame[2]; line_follower_enable(0); speed_loop_stop(id); cmd_note("BRK%d", id); ack("M%d:BRAKE\r\n",id); }
                     else if (cmd == 0x10 && flen >= 7 && frame[2] < 1) { float v; memcpy(&v,&frame[3],4); steering_set(v); float a = steering_get(); cmd_note("SV=%d.%d", (int)a, dec1(a)); ack("SV:%d.%d\r\n", (int)a, dec1(a)); }
-                    else if (cmd == 0xE0 && flen >= 15 && frame[2] < 2) { uint8_t id = frame[2]; float kp,ki,kd; memcpy(&kp,&frame[3],4); memcpy(&ki,&frame[7],4); memcpy(&kd,&frame[11],4); pid_set_gains(&pid_spd[id],kp,ki,kd); cmd_note("PID%d", id); ack("OK\r\n"); }
+                    else if (cmd == 0xE0 && flen >= 15 && frame[2] < 2) { uint8_t id = frame[2]; float kp,ki,kd; memcpy(&kp,&frame[3],4); memcpy(&ki,&frame[7],4); memcpy(&kd,&frame[11],4); speed_loop_set_gains(id,kp,ki,kd); cmd_note("PID%d", id); ack("OK\r\n"); }
                     else if (cmd == 0xF0) { cmd_note("PING->PONG"); ack("PONG\r\n"); }
                     else { cmd_note("ERR:%02X", cmd); ack("?\r\n"); }
                     in_frame = 0; f_len = 0;
@@ -329,9 +361,9 @@ int main(void)
                         ack("PONG\r\n");
                         break;
                     case TXTCMD_STOP:
-                        for (int i = 0; i < 2; i++) { spd_target[i]=0; pid_reset(&pid_spd[i]); motor_bridge_brake(i); }
+                        for (int i = 0; i < 2; i++) speed_loop_stop(i);
                         /* 急停语义 = 彻底停: 必须同步关巡线+自动启动,
-                         * 否则 50ms 后状态机重写 spd_target, 车会"复活"(实测踩坑) */
+                         * 否则 50ms 后状态机重写目标, 车会"复活"(实测踩坑) */
                         line_follower_enable(0);
                         line_follower_set_auto(0);
                         steering_center();  /* 前轮回直行位 (实测 -90, 非 0) */
@@ -344,8 +376,7 @@ int main(void)
                         int id = tc.i0;
                         float v = tc.f0;
                         line_follower_enable(0);  /* 手动指令优先: 退出巡线接管, 否则 50ms 后被覆盖 */
-                        spd_target[id] = (v >= 0) ? v : -v;
-                        spd_dir[id]    = (v >= 0) ? 1 : -1;
+                        speed_loop_set_target(id, v);   /* 带符号目标: 方向由符号统一表达 */
                         cmd_note("M%d=%dRPM", id, (int)((v >= 0) ? v : -v));
                         ack("M%d:%dRPM\r\n", id, (int)(v + ((v < 0) ? -0.5f : 0.5f)));
                         break;
@@ -353,8 +384,8 @@ int main(void)
                     case TXTCMD_MOTOR_BOTH: {
                         float v = tc.f0;
                         line_follower_enable(0);  /* 手动指令优先 */
-                        spd_target[0] = spd_target[1] = (v >= 0) ? v : -v;
-                        spd_dir[0]    = spd_dir[1]    = (v >= 0) ? 1 : -1;
+                        speed_loop_set_target(0, v);
+                        speed_loop_set_target(1, v);
                         cmd_note("MS=%dRPM", (int)((v >= 0) ? v : -v));
                         ack("MS:%dRPM\r\n", (int)(v + ((v < 0) ? -0.5f : 0.5f)));
                         break;
@@ -362,7 +393,7 @@ int main(void)
                     case TXTCMD_BRAKE: {
                         int id = tc.i0;
                         line_follower_enable(0);  /* 手动指令优先 */
-                        spd_target[id] = 0; pid_reset(&pid_spd[id]); motor_bridge_brake(id);
+                        speed_loop_stop(id);
                         cmd_note("BRK%d", id);
                         ack("M%d:BRAKE\r\n", id);
                         break;
@@ -370,8 +401,7 @@ int main(void)
                     case TXTCMD_PID_SET: {
                         int lo = (tc.i0 < 0) ? 0 : tc.i0, hi = (tc.i0 < 0) ? 1 : tc.i0;
                         for (int i = lo; i <= hi; i++) {
-                            pid_kp100[i] = tc.i1; pid_ki100[i] = tc.i2; pid_kd100[i] = tc.i3;
-                            pid_set_gains(&pid_spd[i], tc.i1*0.01f, tc.i2*0.01f, tc.i3*0.01f);
+                            speed_loop_set_gains(i, tc.i1*0.01f, tc.i2*0.01f, tc.i3*0.01f);
                         }
                         if (tc.i0 < 0) ack("PID ALL:%d %d %d\r\n", tc.i1, tc.i2, tc.i3);
                         else           ack("PID%d:%d %d %d\r\n", tc.i0, tc.i1, tc.i2, tc.i3);
@@ -379,21 +409,22 @@ int main(void)
                         break;
                     }
                     case TXTCMD_PID_SWAP: {
-                        int t;
-                        t=pid_kp100[0]; pid_kp100[0]=pid_kp100[1]; pid_kp100[1]=t;
-                        t=pid_ki100[0]; pid_ki100[0]=pid_ki100[1]; pid_ki100[1]=t;
-                        t=pid_kd100[0]; pid_kd100[0]=pid_kd100[1]; pid_kd100[1]=t;
-                        for (int i=0;i<2;i++) pid_set_gains(&pid_spd[i], pid_kp100[i]*0.01f, pid_ki100[i]*0.01f, pid_kd100[i]*0.01f);
+                        /* 增益真值从组件读（不再维护 ×100 镜像数组 → 消除"二进制改参后镜像失效"的漂移） */
+                        float kp[2], ki[2], kd[2];
+                        speed_loop_get_gains(0, &kp[0], &ki[0], &kd[0]);
+                        speed_loop_get_gains(1, &kp[1], &ki[1], &kd[1]);
+                        speed_loop_set_gains(0, kp[1], ki[1], kd[1]);
+                        speed_loop_set_gains(1, kp[0], ki[0], kd[0]);
                         cmd_note("PID SWAP");
                         ack("SWAP:M0 %d %d %d  M1 %d %d %d\r\n",
-                            pid_kp100[0],pid_ki100[0],pid_kd100[0],
-                            pid_kp100[1],pid_ki100[1],pid_kd100[1]);
+                            spd_to_int(kp[1]*100.0f), spd_to_int(ki[1]*100.0f), spd_to_int(kd[1]*100.0f),
+                            spd_to_int(kp[0]*100.0f), spd_to_int(ki[0]*100.0f), spd_to_int(kd[0]*100.0f));
                         break;
                     }
                     case TXTCMD_LINE_EN: {
                         int en = tc.i0 ? 1 : 0;
                         line_follower_enable(en);
-                        if (!en) { spd_target[0]=0; spd_target[1]=0; }
+                        if (!en) { speed_loop_set_target(0, 0.0f); speed_loop_set_target(1, 0.0f); }
                         cmd_note("LINE %s", en ? "ON" : "OFF");
                         ack("LINE:%s\r\n", en ? "ON" : "OFF");
                         break;
@@ -469,8 +500,8 @@ int main(void)
                     }
                     /* ==== 调参工具链命令 (工程支持层, 可开关默认关, STOP 随时安全终止) ====
                      * [对未完善部分的假设] ① 接管权仲裁(C4)/桥接层契约(C1)尚未实施, 本工具暂按
-                     *   "手动命令同模式" 取接管权: line_follower_enable(0) + 写 spd_target +
-                     *   pid_reset + brake; 框架完善后应改为注册制接管, 对接点仅此一处;
+                     *   "手动命令同模式" 取接管权: line_follower_enable(0) + speed_loop_stop()
+                     *   (清目标 + 释放 PID + 物理刹停); 框架完善后应改为注册制接管, 对接点仅此一处;
                      * ② 开环输出经 motor_bridge_set_rate_0E3 直通(桥接层稳定边界), 千分比域
                      *   与 TB6612Protocol 一致, 换驱动芯片时仅桥内适配 */
                     case TXTCMD_STEP: {
@@ -478,11 +509,10 @@ int main(void)
                         if (tc.i0 < 0 || tc.i0 > 1 || tc.i1 < -1000 || tc.i1 > 1000 ||
                             tc.i2 < 100 || tc.i2 > 5000 ||
                             tc.i3 < 1 || tc.i3 > 4) { ack("STEP BAD\r\n"); cmd_note("STEP BAD"); break; }
-                        /* 台架安全前置: 关巡线+关自动, 双轮刹停, PID 复位 */
+                        /* 台架安全前置: 关巡线+关自动, 双轮清目标+PID释放+物理刹停 */
                         line_follower_enable(0);
                         line_follower_set_auto(0);
-                        for (int i = 0; i < 2; i++) { spd_target[i] = 0; pid_reset(&pid_spd[i]); }
-                        motor_bridge_brake(0); motor_bridge_brake(1);
+                        for (int i = 0; i < 2; i++) speed_loop_stop(i);
                         g_step_m      = (uint8_t)tc.i0;
                         g_step_rate   = (int16_t)tc.i1;
                         g_step_div    = (uint8_t)tc.i3;
@@ -502,7 +532,7 @@ int main(void)
                         break;
                     case TXTCMD_FF:
                         if (tc.i0 < 0 || tc.i0 > 500) { ack("FF BAD\r\n"); cmd_note("FF BAD"); break; }
-                        g_ff_gain = tc.i0 / 100.0f;
+                        for (int i = 0; i < 2; i++) speed_loop_set_ff_gain(i, tc.i0 / 100.0f);
                         cmd_note("FF %d", tc.i0);
                         ack("FF:%d.%02d\r\n", tc.i0 / 100, tc.i0 % 100);
                         break;
@@ -552,7 +582,8 @@ int main(void)
             t_pid = now;
 
             /* ═══ 调参工具链: 开环阶跃测试 (激活时独占执行链, 20Hz CSV 遥测) ═══
-             * 测速逻辑与闭环速度环同源 (16位回绕校正 + enc_fb_sign 符号),
+             * 测速复用执行组件 speed_loop_measure()（回绕校正 + 反馈符号与闭环同一份实现，
+             * 杜绝"两处测速逻辑靠注释维持同源"的分叉隐患），
              * 遥测行 "t_ms,rate_0E3,rpm_x10" — 与 PC 端辨识程序/VOFA+ 的接口契约,
              * [对未完善部分的假设] 帧格式即 B3 接入契约 v0, 改动须升版本并同步 PC 工具 */
             if (g_step_active) {
@@ -561,23 +592,17 @@ int main(void)
                 } else {
                     g_step_active = 0;
                     motor_bridge_brake(g_step_m);
-                    pid_reset(&pid_spd[g_step_m]);
+                    speed_loop_reset(g_step_m);     /* 释放 PID + 测速基准作废 */
                     ack("STEP END\r\n");
                 }
-                int32_t enc = (g_step_m == 0) ? encoder_get_count(&henc1) : encoder_get_count(&henc2);
-                uint16_t ppr = (g_step_m == 0) ? henc1.ppr : henc2.ppr;
-                if (g_step_first) { g_step_prev_enc = enc; g_step_prev_tick = now; g_step_first = 0; }
-                float dt = (float)(now - g_step_prev_tick) * 0.001f;
-                if (dt >= 0.005f) {  /* 阶跃期间控制环已旁路, 仅防同 tick 重复计算 */
-                    int32_t delta = (int32_t)enc - (int32_t)g_step_prev_enc;
-                    if (delta >  30000) delta -= 65536;
-                    if (delta < -30000) delta += 65536;
-                    float actual_rpm = (float)delta * 60.0f / (dt * (float)ppr) * (float)enc_fb_sign[g_step_m];
-                    g_step_prev_enc = enc; g_step_prev_tick = now;
+                float step_rpm;
+                if (g_step_first) {
+                    speed_loop_resync(g_step_m, now);   /* 建基准并丢弃该帧（与原实现一致） */
+                    g_step_first = 0;
+                } else if (speed_loop_measure(g_step_m, now, &step_rpm) == SPEED_LOOP_OK) {
                     /* 遥测分频发射: 弱链路(如 BLE 桥)20Hz 会系统性丢行, div=2 → 10Hz */
                     if ((++g_step_cnt % g_step_div) == 0) {
-                        int rpm10 = (int)((actual_rpm >= 0) ? (actual_rpm * 10.0f + 0.5f)
-                                                            : (actual_rpm * 10.0f - 0.5f));
+                        int rpm10 = spd_to_int(step_rpm * 10.0f);
                         char tb[36];
                         int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d\r\n",
                                           (unsigned long)(now - g_step_t0), (int)g_step_rate, rpm10);
@@ -587,73 +612,41 @@ int main(void)
             }
             /* ═══ 正常闭环控制 (阶跃激活时整段旁路) ═══ */
             else {
-            /* ═══ 寻迹控制（启用时覆盖 spd_target[2] / spd_dir[2]） ═══ */
-            line_follower_update(now, spd_target, spd_dir,
+            /* ═══ 寻迹控制（启用时把运动意图推给执行组件） ═══ */
+            line_follower_update(now, g_lf_tgt, g_lf_dir,
                                  encoder_get_count(&henc1),
                                  encoder_get_count(&henc2));
-
-            for (uint8_t m = 0; m < 2; m++) {
-                if (spd_target[m] < 1.0f) {
-                    /* 0速语义 = 停车: 释放PID + 物理刹停 (否则PWM保持旧值, 无线发 M0 0 车不停) */
-                    pid_reset(&pid_spd[m]);
-                    motor_bridge_brake(m);
-                    rpm_disp[m] = 0;
-                    continue;
-                }
-                /* 内侧轮停车：冻结 PID + 物理刹停，退出转弯时从零起步 */
-                if (spd_dir[m] == 0) {
-                    pid_reset(&pid_spd[m]);
-                    motor_bridge_brake(m);  /* 必须物理刹停，否则 PWM 保持旧值电机不停 */
-                    spd_prev_enc[m] = (m == 0) ? encoder_get_count(&henc1) : encoder_get_count(&henc2);
-                    spd_prev_tick[m] = now;
-                    rpm_disp[m] = 0;
-                    continue;
-                }
-                int32_t enc = (m == 0) ? encoder_get_count(&henc1) : encoder_get_count(&henc2);
-                float dt = (float)(now - spd_prev_tick[m]) * 0.001f;
-                if (dt < 0.01f || dt > 2.0f) { spd_prev_tick[m] = now; spd_prev_enc[m] = enc; continue; }
-
-                int32_t delta = (int32_t)enc - (int32_t)spd_prev_enc[m];
-                if (delta >  30000) delta -= 65536;
-                if (delta < -30000) delta += 65536;
-                /* 带符号测速 (P0-2): 反馈保留方向 — 车轮短暂倒转时 PID 能正确纠错,
-                 * 旧版取 |ΔN| 会把倒转误读为正转(正反馈风险) */
-                uint16_t ppr = (m == 0) ? henc1.ppr : henc2.ppr;
-                float actual_rpm = (float)delta * 60.0f / (dt * (float)ppr) * (float)enc_fb_sign[m];
-
-                /* 带符号目标 + 带符号前馈: PID 直接工作在带符号转速域, 方向由符号统一表达 */
-                float set_rpm = spd_target[m] * (float)spd_dir[m];
-                float ff = set_rpm * g_ff_gain;  /* 前馈: FF 命令在线整定, 理论值 1/K≈1.0 */
-                pid_spd[m].params.out_min = -319.0f;
-                pid_spd[m].params.out_max = 319.0f;
-                float pid_out = pid_update(&pid_spd[m], set_rpm, actual_rpm, dt) + ff;
-                if (pid_out < -319.0f) pid_out = -319.0f;
-                if (pid_out >  319.0f) pid_out = 319.0f;
-
-                motor_bridge_set_speed_rpm(m, pid_out);
-                rpm_disp[m] = (int16_t)((actual_rpm >= 0) ? (actual_rpm + 0.5f) : (actual_rpm - 0.5f));
-                spd_prev_enc[m] = enc; spd_prev_tick[m] = now;
+            if (line_follower_enabled()) {  /* 未启用时巡线不写缓冲 → 保留命令下发的意图 */
+                for (uint8_t m = 0; m < 2; m++)
+                    speed_loop_set_target(m, g_lf_tgt[m] * (float)g_lf_dir[m]);
             }
+            /* ═══ 速度环执行组件: 测速 → PID+前馈 → 限幅 → 下发 ═══
+             * "0 速必停"与"内轮停车"语义已在组件内强制（原 main.c 两处停车分支合并） */
+            speed_loop_update(now);
 
             /* ═══ 调参工具链: 闭环遥测 (10Hz CSV, 仅 TEL 1 时发射) ═══
              * 行 "tick,tgt0,rpm0,tgt1,rpm1" — B3 接入契约 v0, 同帧快照
              * [已知限制] 阻塞发送 ~21ms@9600, 仅整定会话开启; DMA 化后可提频 */
             if (g_tel_on && (++g_tel_div & 1) == 0) {
+                speed_loop_state_t s0, s1;
+                speed_loop_get_state(0, &s0); speed_loop_get_state(1, &s1);
                 char tb[44];
                 int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d\r\n",
                                   (unsigned long)now,
-                                  (int)spd_target[0] * spd_dir[0], (int)rpm_disp[0],
-                                  (int)spd_target[1] * spd_dir[1], (int)rpm_disp[1]);
+                                  (int)s0.target_rpm, spd_to_int(s0.actual_rpm),
+                                  (int)s1.target_rpm, spd_to_int(s1.actual_rpm));
                 if (tn > 0) tx_raw(tb, tn);
             }
 
             /* ═══ 调参工具链: 机内记录 (20Hz 写 RAM, DUMP 重放) — 对抗无线丢行 ═══ */
             if (g_rec_on && g_rec_cnt < REC_MAX) {
+                speed_loop_state_t s0, s1;
+                speed_loop_get_state(0, &s0); speed_loop_get_state(1, &s1);
                 rec_tick[g_rec_cnt] = now;
-                rec_t0[g_rec_cnt] = (int16_t)(spd_target[0] * spd_dir[0]);
-                rec_r0[g_rec_cnt] = rpm_disp[0];
-                rec_t1[g_rec_cnt] = (int16_t)(spd_target[1] * spd_dir[1]);
-                rec_r1[g_rec_cnt] = rpm_disp[1];
+                rec_t0[g_rec_cnt] = (int16_t)s0.target_rpm;
+                rec_r0[g_rec_cnt] = (int16_t)spd_to_int(s0.actual_rpm);
+                rec_t1[g_rec_cnt] = (int16_t)s1.target_rpm;
+                rec_r1[g_rec_cnt] = (int16_t)spd_to_int(s1.actual_rpm);
                 g_rec_cnt++;
             }
             } /* 正常闭环控制 else 段结束 */
@@ -690,10 +683,14 @@ int main(void)
             case 0: /* IMU 欧拉角 */
                 snprintf(b,26,"R:%d.%d P:%d.%d Y:%d.%d",ri,rd,pi,pd,yi,yd);
                 oled_line(0,b); break;
-            case 1: /* PID 速度 实际->目标 */
+            case 1: { /* 速度环 实际->目标 (带符号, 由执行组件状态读出) */
+                speed_loop_state_t s0, s1;
+                speed_loop_get_state(0, &s0); speed_loop_get_state(1, &s1);
                 snprintf(b,26,"M0:%d->%d  M1:%d->%d",
-                         rpm_disp[0],(int)spd_target[0],rpm_disp[1],(int)spd_target[1]);
+                         spd_to_int(s0.actual_rpm), (int)s0.target_rpm,
+                         spd_to_int(s1.actual_rpm), (int)s1.target_rpm);
                 oled_line(1,b); break;
+            }
             case 2: /* 编码器计数（标定转弯/直行距离用） */
                 snprintf(b,26,"ENC0:%d  ENC1:%d", (int)enc1, (int)enc2);
                 oled_line(2,b); break;
@@ -710,12 +707,16 @@ int main(void)
             case 4: /* 最近应答 (指令接收后的回复, 无线调试确认) */
                 snprintf(b,26,"RSP:%-17s", s_last_resp);
                 oled_line(4,b); break;
-            case 5: /* PID 参数 M0/M1 (合并一行, 腾出命令显示页) */
+            case 5: { /* PID 参数 M0/M1 (合并一行, 腾出命令显示页); 真值从组件读, ×100 显示 */
+                float kp[2], ki[2], kd[2];
+                speed_loop_get_gains(0, &kp[0], &ki[0], &kd[0]);
+                speed_loop_get_gains(1, &kp[1], &ki[1], &kd[1]);
                 snprintf(b,26,"P%d,%d I%d,%d D%d,%d",
-                         pid_kp100[0], pid_kp100[1],
-                         pid_ki100[0], pid_ki100[1],
-                         pid_kd100[0], pid_kd100[1]);
+                         spd_to_int(kp[0]*100.0f), spd_to_int(kp[1]*100.0f),
+                         spd_to_int(ki[0]*100.0f), spd_to_int(ki[1]*100.0f),
+                         spd_to_int(kd[0]*100.0f), spd_to_int(kd[1]*100.0f));
                 oled_line(5,b); break;
+            }
             case 6: /* 最近执行的命令 (无线命令执行确认) */
                 snprintf(b,26,"CMD:%-16s", s_last_cmd);
                 oled_line(6,b); break;
