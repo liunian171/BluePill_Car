@@ -137,6 +137,16 @@ int main(void)
     check(txt_cmd_parse("DUMP", &tc) && tc.type == TXTCMD_DUMP, "DUMP");
     check(!txt_cmd_parse("RECA 1", &tc),                      "RECA 仍拒绝");
 
+    /* ---- 上位机对接 (2026-09-14): ODOM 里程计上报 / WD 命令看门狗 ---- */
+    check(txt_cmd_parse("ODOM 1", &tc) && tc.type == TXTCMD_ODOM && tc.i0 == 1, "ODOM 1");
+    check(txt_cmd_parse("ODOM 0", &tc) && tc.type == TXTCMD_ODOM && tc.i0 == 0, "ODOM 0");
+    check(!txt_cmd_parse("ODOM", &tc),                        "ODOM 无参数 -> 拒绝");
+    check(!txt_cmd_parse("ODOMA 1", &tc),                     "ODOMA 仍拒绝");
+    check(txt_cmd_parse("WD 500", &tc) && tc.type == TXTCMD_WD && tc.i0 == 500, "WD 500");
+    check(txt_cmd_parse("WD 0", &tc) && tc.type == TXTCMD_WD && tc.i0 == 0,     "WD 0 (关)");
+    check(!txt_cmd_parse("WD", &tc),                          "WD 无参数 -> 拒绝");
+    check(!txt_cmd_parse("WDX 100", &tc),                     "WDX 仍拒绝");
+
     /* ---- 兜底 ---- */
     check(!txt_cmd_parse("", &tc),                            "空串 -> 拒绝");
     check(!txt_cmd_parse("HELLO", &tc),                       "HELLO -> 拒绝");

@@ -25,6 +25,7 @@
 #include "driver/i2c_hardware_ops.h"
 #include "driver/line_follower.h"
 #include "driver/txt_cmd.h"
+#include "driver/odom.h"
 #include "driver/servo_bridge.h"
 #include "driver/steering.h"
 #include "driver/speed_loop.h"
@@ -138,34 +139,47 @@ static uint8_t      g_step_div      = 1;       /* 遥测分频: 1=20Hz 2=10Hz (�
 static uint8_t      g_step_cnt      = 0;       /* 遥测分频计数 */
 static uint8_t      g_tel_on        = 0;       /* 闭环遥测开关 (10Hz CSV, 阻塞发送, 仅整定会话开启) */
 static uint8_t      g_tel_div       = 0;       /* 50ms→100ms 分频 */
+
+/* ==== 上位机对接 (2026-09-14): 里程计上报 + 命令看门狗 ====
+ * 上行二进制帧 (复用 0xAA...FFFF 帧体系, 无校验 — 需求方确认只要增量+时间戳):
+ *   ODOM 0x51: 帧头|ΔX|ΔY|Δθ|ts_ms|FFFF = 20B @20Hz (50ms, 与控制环同拍)
+ *   ATT  0x52: 帧头|roll|pitch|yaw|ts_ms|FFFF = 20B @10Hz
+ * 带宽: 全开 ≈ 600B/s ≈ 62%@9600 — 仅对接会话开启; 20ms 周期(50Hz)需先提速(见 README §3.9) */
+#define ODOM_FRAME_CMD   0x51
+#define ATT_FRAME_CMD    0x52
+static uint8_t      g_odom_on       = 0;       /* 里程计上报开关 (ODOM 命令 / STOP 关闭) */
+static uint8_t      g_att_div       = 0;       /* ATT 10Hz 分频 */
+
+/* 命令看门狗: WD <ms> 使能; 超时无任何下行字节 → 急停 (上位机断链兜底, PDF 安全机制条款) */
+static uint32_t     g_wd_ms         = 0;       /* 0 = 关 (默认, 保持现有人机行为) */
+static uint32_t     g_last_rx_tick  = 0;       /* 最近下行字节时刻 (主循环每字节刷新) */
+static uint8_t      g_wd_fired      = 0;       /* 触发闩锁: 防止超时期间反复急停刷屏 */
+
+/* ==== 里程计感知组件 (odom) 的标定表 + IO 绑定 — 车知识集中注入 ==== */
+static const odom_cfg_t g_odom_cfg = {
+    .ppr    = { 1466.0f, 1466.0f },          /* 编码器实测 (README §1) */
+    .wheel_circ_mm   = 205.0f,               /* 轮周长 (README 权威 20.5cm) */
+    .wheel_track_mm  = 0.0f,                 /* 轮距 ⚠️ 待标定 — 本车走 IMU yaw 差分, 不参与 */
+    .enc_span        = 65536.0f,
+    .sign            = { 1, -1 },            /* ⚠️ 必须镜像 g_spd_cfg.ch[].fb_sign (E2 接反) */
+};
+static int32_t odom_io_read_enc(uint8_t id)
+{
+    return (id == 0) ? encoder_get_count(&henc1) : encoder_get_count(&henc2);
+}
+static void odom_io_get_yaw(float *yaw_deg)
+{
+    *yaw_deg = imu_bridge_get_yaw(0);        /* ° , 逆时针为正 (Mahony 融合输出) */
+}
+static const odom_io_t g_odom_io = {
+    .read_enc = odom_io_read_enc,
+    .get_yaw  = odom_io_get_yaw,             /* NULL 则回退编码器差分(需轮距) */
+};
 /* USER CODE END PV */
 
 void SystemClock_Config(void);
 
 /* USER CODE BEGIN 0 */
-/* VOFA+ FireWater: 发送 N 个 float（自动转大端+加校验） */
-static void firewater_send(float *data, uint8_t n)
-{
-    uint8_t buf[128];
-    uint8_t len = 1 + n * 4;  /* 类型ID + n个float */
-    buf[0] = 0x55; buf[1] = 0x55;  /* 帧头 */
-    buf[2] = len;                    /* 长度 */
-    buf[3] = 0x01;                   /* float类型 */
-    for (uint8_t i = 0; i < n; i++) {
-        uint32_t v;
-        memcpy(&v, &data[i], 4);
-        /* 小端→大端 */
-        buf[4+i*4+0] = (uint8_t)(v >> 24);
-        buf[4+i*4+1] = (uint8_t)(v >> 16);
-        buf[4+i*4+2] = (uint8_t)(v >> 8);
-        buf[4+i*4+3] = (uint8_t)(v);
-    }
-    uint8_t sum = 0;
-    for (uint8_t i = 2; i < 2 + len; i++) sum += buf[i];
-    buf[4 + n*4] = sum;
-    HAL_UART_Transmit(&huart2, buf, 5 + n*4, 100);
-}
-
 /* ==== 速度环组件的 IO 绑定（组装层职责：把组件接口接到器件/传感器）====
  * 组件只持函数指针（不 include 桥接层头），故执行栈向上不反向依赖。
  * 换驱动芯片 / 换编码器接口只改这三个绑定，组件与上层不动。 */
@@ -352,6 +366,11 @@ int main(void)
     /* ---- IMU ---- */
     if (imu_bridge_init(0, &g_imu_cfg) != BRIDGE_OK)
         Error_Handler();
+
+    /* ---- 里程计感知组件 (ΔX/ΔY/Δθ 增量位姿, 上位机 ODOM 上报数据源) ----
+     * 依赖 imu_bridge 已 init（yaw 注入）。基准在主循环首拍由 update 自动建立。 */
+    if (odom_init(&g_odom_cfg, &g_odom_io) != ODOM_OK)
+        Error_Handler();
     /* USER CODE END 2 */
 
     /* ---- 主循环 ---- */
@@ -368,6 +387,8 @@ int main(void)
         static uint8_t txt_len = 0;
         uint8_t b;
         while (ringbuf_read(&g_ringbuf_debug, &b) == 0) {
+            g_last_rx_tick = HAL_GetTick();   /* 看门狗: 任何下行字节都算"活" */
+            g_wd_fired = 0;                   /* 解除触发闩锁 (断链恢复即重新武装) */
             if (b == 0xAA && !in_frame) { f_len = 0; in_frame = 1; t_frame = HAL_GetTick(); }
             if (in_frame) {
                 if (f_len >= sizeof(frame)) { in_frame = 0; continue; }
@@ -380,6 +401,7 @@ int main(void)
                     else if (cmd == 0x03 && flen >= 3 && frame[2] < 2) { uint8_t id = frame[2]; line_follower_enable(0); speed_loop_stop(id); cmd_note("BRK%d", id); ack("M%d:BRAKE\r\n",id); }
                     else if (cmd == 0x10 && flen >= 7 && frame[2] < 1) { float v; memcpy(&v,&frame[3],4); steering_set(v); float a = steering_get(); cmd_note("SV=%d.%d", (int)a, dec1(a)); ack("SV:%d.%d\r\n", (int)a, dec1(a)); }
                     else if (cmd == 0xE0 && flen >= 15 && frame[2] < 2) { uint8_t id = frame[2]; float kp,ki,kd; memcpy(&kp,&frame[3],4); memcpy(&ki,&frame[7],4); memcpy(&kd,&frame[11],4); speed_loop_set_gains(id,kp,ki,kd); cmd_note("PID%d", id); ack("OK\r\n"); }
+                    else if (cmd == 0x20 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); if (v >= -100.0f && v <= 100.0f) { line_follower_enable(0); (void)motor_bridge_set_rate_0E3(id, (int16_t)(v * 10.0f)); cmd_note("DUTY%d", id); ack("D%d:%d.%d\r\n", id, (int)v, dec1(v)); } else { cmd_note("DUTY BAD"); ack("?\r\n"); } }
                     else if (cmd == 0xF0) { cmd_note("PING->PONG"); ack("PONG\r\n"); }
                     else { cmd_note("ERR:%02X", cmd); ack("?\r\n"); }
                     in_frame = 0; f_len = 0;
@@ -408,6 +430,7 @@ int main(void)
                         steering_center();  /* 前轮回直行位 (实测 -90, 非 0) */
                         /* 调参工具链随急停关闭 (阶跃测试中途=安全终止, 遥测/记录回默认关) */
                         g_step_active = 0; g_tel_on = 0; g_rec_on = 0;
+                        g_odom_on = 0;    /* 上位机对接上报同样关闭 (看门狗保持武装) */
                         cmd_note("STOP ALL");
                         ack("STOP OK LINE OFF\r\n");
                         break;
@@ -599,6 +622,20 @@ int main(void)
                         cmd_note("DUMP");
                         break;
                     }
+                    case TXTCMD_ODOM:
+                        g_odom_on = tc.i0 ? 1 : 0;
+                        cmd_note("ODOM %d", g_odom_on);
+                        ack("ODOM:%d\r\n", g_odom_on);
+                        break;
+                    case TXTCMD_WD:
+                        /* 范围 0~60000ms, 0=关; 使能时刷新喂狗时刻并解除闩锁 */
+                        if (tc.i0 < 0 || tc.i0 > 60000) { ack("WD BAD\r\n"); cmd_note("WD BAD"); break; }
+                        g_wd_ms = (uint32_t)tc.i0;
+                        g_last_rx_tick = HAL_GetTick();
+                        g_wd_fired = 0;
+                        cmd_note("WD %dms", tc.i0);
+                        ack("WD:%d\r\n", tc.i0);
+                        break;
                     default:
                         break;
                     }
@@ -619,6 +656,19 @@ int main(void)
         uint32_t now = HAL_GetTick();
         if (now - t_pid >= 50) {
             t_pid = now;
+
+            /* ═══ 命令看门狗: 超时无任何下行字节 → 急停一次 (闩锁防刷屏) ═══
+             * 断链恢复 = 收到任意字节自动解除闩锁 (主循环喂狗处), 无需重新配置 */
+            if (g_wd_ms > 0 && !g_wd_fired &&
+                (now - g_last_rx_tick) > g_wd_ms) {
+                for (int i = 0; i < 2; i++) speed_loop_stop(i);
+                line_follower_enable(0);
+                line_follower_set_auto(0);
+                steering_center();
+                g_wd_fired = 1;
+                cmd_note("WD TIMEOUT");
+                tx_raw("WD TIMEOUT STOP\r\n", 17);
+            }
 
             /* ═══ 调参工具链: 开环阶跃测试 (激活时独占执行链, 20Hz CSV 遥测) ═══
              * 测速复用执行组件 speed_loop_measure()（回绕校正 + 反馈符号与闭环同一份实现，
@@ -662,6 +712,35 @@ int main(void)
             /* ═══ 速度环执行组件: 测速 → PID+前馈 → 限幅 → 下发 ═══
              * "0 速必停"与"内轮停车"语义已在组件内强制（原 main.c 两处停车分支合并） */
             speed_loop_update(now);
+
+            /* ═══ 里程计感知组件: 增量位姿解算 (50ms 与控制环同拍) ═══
+             * 恒解算保持位姿新鲜; 仅 g_odom_on 时组帧发送 (ODOM 20Hz + ATT 10Hz)
+             * 帧格式见 PV 区注释 — 上位机按"帧头+CMD"分发, 无校验(需求方确认) */
+            odom_delta_t od;
+            if (odom_update(now, &od) == ODOM_OK && g_odom_on) {
+                uint8_t ob[20];
+                float   th = od.dtheta_deg;
+                ob[0] = 0xAA; ob[1] = ODOM_FRAME_CMD;
+                memcpy(&ob[2],  &od.dx_mm, 4);
+                memcpy(&ob[6],  &od.dy_mm, 4);
+                memcpy(&ob[10], &th,       4);
+                memcpy(&ob[14], &now,      4);
+                ob[18] = 0xFF; ob[19] = 0xFF;
+                tx_raw((const char *)ob, 20);
+                if ((++g_att_div & 1) == 0) {   /* ATT 10Hz: 欧拉角透传 (IMU Mahony) */
+                    uint8_t ab[20];
+                    float r = imu_bridge_get_roll(0);
+                    float p = imu_bridge_get_pitch(0);
+                    float y = imu_bridge_get_yaw(0);
+                    ab[0] = 0xAA; ab[1] = ATT_FRAME_CMD;
+                    memcpy(&ab[2],  &r,   4);
+                    memcpy(&ab[6],  &p,   4);
+                    memcpy(&ab[10], &y,   4);
+                    memcpy(&ab[14], &now, 4);
+                    ab[18] = 0xFF; ab[19] = 0xFF;
+                    tx_raw((const char *)ab, 20);
+                }
+            }
 
             /* ═══ 调参工具链: 闭环遥测 (10Hz CSV, 仅 TEL 1 时发射) ═══
              * 行 "tick,tgt0,rpm0,tgt1,rpm1" — B3 接入契约 v0, 同帧快照

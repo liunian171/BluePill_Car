@@ -151,6 +151,26 @@ int txt_cmd_parse(const char *s, TxtCmd *o)
         return 1;
     }
 
+    /* ---- ODOM 0/1 (上位机对接: 里程计上报开关) ---- */
+    if (strncmp(p, "ODOM", 4) == 0) {
+        const char *q = p + 4;
+        int en;
+        if (!parse_int(&q, &en)) return 0;
+        o->type = TXTCMD_ODOM;
+        o->i0 = en;
+        return 1;
+    }
+
+    /* ---- WD <ms> (上位机对接: 命令看门狗, 0=关; 范围校验在 main 分发层) ---- */
+    if (strncmp(p, "WD", 2) == 0) {
+        const char *q = p + 2;
+        int ms;
+        if (!parse_int(&q, &ms)) return 0;
+        o->type = TXTCMD_WD;
+        o->i0 = ms;
+        return 1;
+    }
+
     /* ---- MS <rpm> (双电机同步, 必须先于 M0/M1 判定? 无冲突, 位置任意) ---- */
     if (p[0] == 'M' && p[1] == 'S' && p[2] == ' ') {
         const char *q = p + 2;
