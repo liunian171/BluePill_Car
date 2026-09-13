@@ -31,10 +31,11 @@
 | 编码器 | TIM2/TIM3 编码器模式 | **PPR=1466（实测）** |
 | 轮组 | 车轮周长 20.5cm | max_rpm=319（实测标定，勿用 200） |
 | 巡线 | 5 路灰度 PB3-PB7 | 黑线窄于间距，居中仅 S3 亮，二值采样 50ms/帧 |
-| IMU | MPU6050 (I2C2 0x68) | 互补滤波 + 动态α + 运行中零偏补偿 |
+| IMU | MPU6050 (I2C2 0x68) | **Mahony 四元数融合**(Kp=0.5, Ki=0) + 静止时陀螺零偏漂移补偿；启动 50 次采样初始零偏校准 |
 | 显示 | SSD1315 OLED (I2C2 0x3C) | 128×64，4 行 8×16 |
 | 舵机 | TIM4_CH3 (PB8) | 50Hz PWM |
-| 串口 | USART2 (PA2/PA3) | 115200-8N1，接 BT04 蓝牙；二进制帧协议 + 文本调参命令 |
+| 串口 | USART2 (PA2/PA3) | **9600-8N1**，接 BT04 蓝牙（⚠️ 旧文档曾误写 115200，代码真值 9600）；二进制帧协议 + 文本调参命令 |
+| 通信接口规范 | — | **上位机对接看 [`README.md`](README.md) §3**（上行四类 / 下行两类 / 时序带宽 / 已知限制） |
 
 引脚全表见 `doc/工程文档.md`；**`.ioc` 无绝对把握不擅自修改**（用户铁律），改引脚/外设先问用户。
 
@@ -72,7 +73,7 @@ Core/Src/driver/
   ├─ 组件层   决策: line_follower.c(巡线状态机)                ← 物理量→运动意图
   │          感知: 姿态/巡线感知（待从 imu_bridge/line_follower 拆出）← 裸数→物理量
   │          执行: steering.c(转向) / speed_loop.c(速度环) ✅ 均已成 ← 意图→器件级目标
-  │          解析: txt_cmd.c(文本命令) uart_cmd_parser.c(协议帧, 死代码待处置)
+  │          解析: txt_cmd.c(文本命令) + main.c 内联二进制帧分发（原 uart_cmd_parser 死代码已于 2026-09-13 删除）
   ├─ 执行对象层 motor.cpp servo.cpp (旧称功能对象)               ← 器件级目标→器件语言
   ├─ 器件层   TB6612MotorProtocol / PWMServoProtocol / MPU6050(IIMU) (旧称业务对象) ← 器件翻译
   ├─ 驱动层   策略层 pwm.c encoder.c uart.c usergpio.c useri2c.c ← 平台无关
@@ -90,10 +91,11 @@ Core/Src/common/     通用算法层: ringbuf / pid / imu_filter(滤波核心) /
 ```
 while(1):
   ① while 清空 ringbuf → 文本命令解析(txt_cmd) / 二进制帧解析(帧超时 100ms 重同步)
-     （uart_cmd_parser_tick 未调用 —— 死代码，评审 C1）
-  每 50ms:  line_follower_update(now,...) → PID 速度环 ×2 → motor_bridge_set_speed_rpm
-            （0 速 = pid_reset + 物理刹停；spd_dir==0 = 内侧轮刹停）
-  每 100ms: imu_bridge_update_filter + 读编码器 + OLED 8 页组版（2026-09-11 核实：无串口上报）
+     （上行接口（帧/应答/遥测格式）权威见 README.md §3）
+  每 50ms:  line_follower_update(now, 意图缓冲) → 推给 speed_loop → speed_loop_update(now)
+            （0 速 / 内轮停车 = 释放 PID + 物理刹停，语义在 speed_loop 组件内）
+  每 100ms: imu_bridge_update_filter(0, now) + 读编码器 + OLED **单页轮转**（8 页 800ms 一轮）
+            （2026-09-11 核实：无串口上报；遥测须按需开启，见 README.md §3.5）
 ```
 
 ### 4.3 巡线状态机（详见 doc/巡线逻辑设计文档.md，唯一权威）
@@ -160,6 +162,7 @@ while(1):
 
 | 文档 | 定位 |
 |------|------|
+| `README.md` | **上位机对接入口**：串口通信接口（上行四类 / 下行两类 / 时序带宽 / 已知限制）+ 构建烧录 |
 | `doc/工程文档.md` | 架构/引脚/协议/初始化流程权威参考 |
 | `doc/开发跟踪.md` | 阶段/条目状态跟踪（W 无线 / SS 舵机 / 巡线 / 架构治理） |
 | `doc/巡线逻辑设计文档.md` | 巡线状态机唯一权威（决策表+状态机+参数） |
