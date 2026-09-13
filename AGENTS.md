@@ -58,9 +58,11 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Debug/BluePill_Car.elf 0x08000000 
 **硬件在环两级模式**（沿用 SimpleCar 协议）：
 - **一级（优先）**: Agent 直驱——用户接线完毕告知 → Agent 执行 flash.bat 烧录 + 串口抓日志判读
 - **二级（兜底）**: 指令-回读——Agent 给完整命令行 + 预期现象清单，用户复制执行后回读输出
-- 串口日志是第一证据来源。**⚠️ 当前固件无周期上报**（2026-09-11 真机核实），上行只有三类：
+- 串口日志是第一证据来源。**默认无周期上报**（2026-09-11 真机核实），上行基础三类：
   ① 开机横幅 `UART2 Ready`（复位后一次）；② 命令应答 `ack()`（如 `SV:-90.0` / `M0:60RPM`）；③ 巡线诊断事件 `tx_raw`（`line_follower` 事件回调，仅巡线使能时）
-- IMU 欧拉角 / 编码器 / PID 等周期数据**只刷 OLED（页 0-7）**，不上串口 → 判读这些量需看屏幕，或后续加"按需上报"命令
+  ④ **按需**（默认关）：调参遥测（`TEL/STEP/DUMP`）+ 上位机里程计帧（`ODOM 1` → 二进制 ODOM 0x51 @20Hz + ATT 0x52 @10Hz，格式见 README §3.8.1）
+- IMU 欧拉角 / 编码器 / PID 等周期数据**默认只刷 OLED（页 0-7）**；开 `ODOM 1` 后欧拉角经 ATT 帧上串口
+- **命令看门狗 `WD <ms>`**（默认关）：超时无下行字节自动急停——上位机断链兜底（PDF 安全机制条款），ROS 对接时建议 500ms
 - 真机串口端口：BT04 出 SPP 口（本机实测 **COM15**，9600-8N1；端口号会随配对变化，可用 `python -c "import serial.tools.list_ports as p;[print(x.device,x.description) for x in p.comports()]"` 查）
 
 ## 四、工程架构现状
@@ -93,10 +95,11 @@ Core/Src/common/     通用算法层: ringbuf / pid / imu_filter(滤波核心) /
 while(1):
   ① while 清空 ringbuf → 文本命令解析(txt_cmd) / 二进制帧解析(帧超时 100ms 重同步)
      （上行接口（帧/应答/遥测格式）权威见 README.md §3）
-  每 50ms:  line_follower_update(now, 意图缓冲) → 推给 speed_loop → speed_loop_update(now)
+  每 50ms:  看门狗判定(WD 使能时) → line_follower_update(now, 意图缓冲) → 推给 speed_loop → speed_loop_update(now)
+            → odom_update(now)（增量位姿；ODOM 1 时发 ODOM 0x51 + ATT 0x52 帧）
             （0 速 / 内轮停车 = 释放 PID + 物理刹停，语义在 speed_loop 组件内）
   每 100ms: imu_bridge_update_filter(0, now) + 读编码器 + OLED **单页轮转**（8 页 800ms 一轮）
-            （2026-09-11 核实：无串口上报；遥测须按需开启，见 README.md §3.5）
+            （2026-09-11 核实：无串口上报；遥测须按需开启，见 README.md §3.5/§3.8.1）
 ```
 
 ### 4.3 巡线状态机（详见 doc/巡线逻辑设计文档.md，唯一权威）
