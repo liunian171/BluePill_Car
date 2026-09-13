@@ -27,6 +27,7 @@ void motor_bridge_init(uint8_t id,
 
 void motor_bridge_set_speed_rpm(uint8_t id, float rpm);
 void motor_bridge_set_speed_mps(uint8_t id, float mps);
+void motor_bridge_set_rate_0E3(uint8_t id, int16_t rate_0E3); /* 千分比直通(调参阶跃测试用, 绕过 RPM 映射); id1 同样镜像驱动侧取反 */
 void motor_bridge_stop(uint8_t id);
 void motor_bridge_brake(uint8_t id);
 void motor_bridge_set_dead_zone(uint8_t id, float rpm);

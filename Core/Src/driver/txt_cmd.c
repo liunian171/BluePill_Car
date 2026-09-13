@@ -100,6 +100,28 @@ int txt_cmd_parse(const char *s, TxtCmd *o)
         return 1;
     }
 
+    /* ---- STEP <id> <rate_0E3> <dur_ms> (调参: 开环阶跃测试) ----
+     * 数值范围校验在 main 分发层 (需 ack 错误码), 此处只做语法 + id 域 */
+    if (strncmp(p, "STEP", 4) == 0) {
+        const char *q = p + 4;
+        int id, u, t;
+        if (!parse_int(&q, &id) || id < 0 || id > 1) return 0;
+        if (!parse_int(&q, &u) || !parse_int(&q, &t)) return 0;
+        o->type = TXTCMD_STEP;
+        o->i0 = id; o->i1 = u; o->i2 = t;
+        return 1;
+    }
+
+    /* ---- TEL 0/1 (调参: 闭环遥测开关) ---- */
+    if (strncmp(p, "TEL", 3) == 0) {
+        const char *q = p + 3;
+        int en;
+        if (!parse_int(&q, &en)) return 0;
+        o->type = TXTCMD_TEL;
+        o->i0 = en;
+        return 1;
+    }
+
     /* ---- MS <rpm> (双电机同步, 必须先于 M0/M1 判定? 无冲突, 位置任意) ---- */
     if (p[0] == 'M' && p[1] == 'S' && p[2] == ' ') {
         const char *q = p + 2;

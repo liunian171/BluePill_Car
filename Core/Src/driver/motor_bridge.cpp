@@ -35,6 +35,13 @@ void motor_bridge_set_speed_mps(uint8_t id, float mps)
     motor[id]->set_speed_mps(mps);
 }
 
+void motor_bridge_set_rate_0E3(uint8_t id, int16_t rate_0E3)
+{
+    if (motor[id] == nullptr || tb6612_proto[id] == nullptr) return;
+    if (id == 1) rate_0E3 = -rate_0E3;  /* 镜像驱动侧取反(与 rpm/mps 通道一致) */
+    tb6612_proto[id]->set_speed_rate_0E3(rate_0E3);
+}
+
 void motor_bridge_stop(uint8_t id)
 {
     if (motor[id] == nullptr) return;

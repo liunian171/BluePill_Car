@@ -67,6 +67,18 @@ static int8_t       enc_fb_sign[2]  = {1, -1}; /* 反馈符号必须镜像驱动
 static char         s_last_cmd[20]  = "NONE";  /* 最近执行的命令 (OLED 页6 显示) */
 static char         s_last_resp[20] = "-";     /* 最近应答/回复 (OLED 页4 显示) */
 static uint32_t     t_frame         = 0;       /* 二进制帧最近字节时间戳 (超时重同步) */
+
+/* ==== 调参工具链 (工程支持层, 可开关, 默认关 — STOP 急停自动关闭) ==== */
+static uint8_t      g_step_active   = 0;       /* 开环阶跃测试进行中 (激活时独占 50ms 控制帧) */
+static uint8_t      g_step_m        = 0;       /* 测试电机 id */
+static int16_t      g_step_rate     = 0;       /* 阶跃千分比 (±1000) */
+static uint32_t     g_step_t0       = 0;       /* 阶跃起始 tick (遥测 t 基准) */
+static uint32_t     g_step_end      = 0;       /* 阶跃结束 tick */
+static int32_t      g_step_prev_enc = 0;
+static uint32_t     g_step_prev_tick= 0;
+static uint8_t      g_step_first    = 1;       /* 首帧测速基准初始化标志 */
+static uint8_t      g_tel_on        = 0;       /* 闭环遥测开关 (10Hz CSV, 阻塞发送, 仅整定会话开启) */
+static uint8_t      g_tel_div       = 0;       /* 50ms→100ms 分频 */
 /* USER CODE END PV */
 
 void SystemClock_Config(void);
@@ -310,6 +322,8 @@ int main(void)
                         line_follower_enable(0);
                         line_follower_set_auto(0);
                         steering_center();  /* 前轮回直行位 (实测 -90, 非 0) */
+                        /* 调参工具链随急停关闭 (阶跃测试中途=安全终止, 遥测回默认关) */
+                        g_step_active = 0; g_tel_on = 0;
                         cmd_note("STOP ALL");
                         ack("STOP OK LINE OFF\r\n");
                         break;
@@ -440,6 +454,36 @@ int main(void)
                             (r == STEERING_OK) ? "" : " BAD");
                         break;
                     }
+                    /* ==== 调参工具链命令 (工程支持层, 可开关默认关, STOP 随时安全终止) ====
+                     * [对未完善部分的假设] ① 接管权仲裁(C4)/桥接层契约(C1)尚未实施, 本工具暂按
+                     *   "手动命令同模式" 取接管权: line_follower_enable(0) + 写 spd_target +
+                     *   pid_reset + brake; 框架完善后应改为注册制接管, 对接点仅此一处;
+                     * ② 开环输出经 motor_bridge_set_rate_0E3 直通(桥接层稳定边界), 千分比域
+                     *   与 TB6612Protocol 一致, 换驱动芯片时仅桥内适配 */
+                    case TXTCMD_STEP: {
+                        if (g_step_active) { ack("STEP BUSY\r\n"); cmd_note("STEP BUSY"); break; }
+                        if (tc.i0 < 0 || tc.i0 > 1 || tc.i1 < -1000 || tc.i1 > 1000 ||
+                            tc.i2 < 100 || tc.i2 > 5000) { ack("STEP BAD\r\n"); cmd_note("STEP BAD"); break; }
+                        /* 台架安全前置: 关巡线+关自动, 双轮刹停, PID 复位 */
+                        line_follower_enable(0);
+                        line_follower_set_auto(0);
+                        for (int i = 0; i < 2; i++) { spd_target[i] = 0; pid_reset(&pid_spd[i]); }
+                        motor_bridge_brake(0); motor_bridge_brake(1);
+                        g_step_m      = (uint8_t)tc.i0;
+                        g_step_rate   = (int16_t)tc.i1;
+                        g_step_t0     = HAL_GetTick();
+                        g_step_end    = g_step_t0 + (uint32_t)tc.i2;
+                        g_step_first  = 1;
+                        g_step_active = 1;
+                        cmd_note("STEP%d %d", g_step_m, g_step_rate);
+                        ack("STEP GO %d %d %d\r\n", tc.i0, tc.i1, tc.i2);
+                        break;
+                    }
+                    case TXTCMD_TEL:
+                        g_tel_on = tc.i0 ? 1 : 0;
+                        cmd_note("TEL %d", g_tel_on);
+                        ack("TEL:%d\r\n", g_tel_on);
+                        break;
                     default:
                         break;
                     }
@@ -461,6 +505,39 @@ int main(void)
         if (now - t_pid >= 50) {
             t_pid = now;
 
+            /* ═══ 调参工具链: 开环阶跃测试 (激活时独占执行链, 20Hz CSV 遥测) ═══
+             * 测速逻辑与闭环速度环同源 (16位回绕校正 + enc_fb_sign 符号),
+             * 遥测行 "t_ms,rate_0E3,rpm_x10" — 与 PC 端辨识程序/VOFA+ 的接口契约,
+             * [对未完善部分的假设] 帧格式即 B3 接入契约 v0, 改动须升版本并同步 PC 工具 */
+            if (g_step_active) {
+                if (now < g_step_end) {
+                    motor_bridge_set_rate_0E3(g_step_m, g_step_rate);
+                } else {
+                    g_step_active = 0;
+                    motor_bridge_brake(g_step_m);
+                    pid_reset(&pid_spd[g_step_m]);
+                    ack("STEP END\r\n");
+                }
+                int32_t enc = (g_step_m == 0) ? encoder_get_count(&henc1) : encoder_get_count(&henc2);
+                uint16_t ppr = (g_step_m == 0) ? henc1.ppr : henc2.ppr;
+                if (g_step_first) { g_step_prev_enc = enc; g_step_prev_tick = now; g_step_first = 0; }
+                float dt = (float)(now - g_step_prev_tick) * 0.001f;
+                if (dt >= 0.005f) {  /* 阶跃期间控制环已旁路, 仅防同 tick 重复计算 */
+                    int32_t delta = (int32_t)enc - (int32_t)g_step_prev_enc;
+                    if (delta >  30000) delta -= 65536;
+                    if (delta < -30000) delta += 65536;
+                    float actual_rpm = (float)delta * 60.0f / (dt * (float)ppr) * (float)enc_fb_sign[g_step_m];
+                    int rpm10 = (int)((actual_rpm >= 0) ? (actual_rpm * 10.0f + 0.5f)
+                                                        : (actual_rpm * 10.0f - 0.5f));
+                    char tb[36];
+                    int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d\r\n",
+                                      (unsigned long)(now - g_step_t0), (int)g_step_rate, rpm10);
+                    if (tn > 0) tx_raw(tb, tn);  /* [已知限制] 阻塞发送 ~16ms@9600, 开环测试可容忍; DMA 化见 P1-6 */
+                    g_step_prev_enc = enc; g_step_prev_tick = now;
+                }
+            }
+            /* ═══ 正常闭环控制 (阶跃激活时整段旁路) ═══ */
+            else {
             /* ═══ 寻迹控制（启用时覆盖 spd_target[2] / spd_dir[2]） ═══ */
             line_follower_update(now, spd_target, spd_dir,
                                  encoder_get_count(&henc1),
@@ -508,6 +585,19 @@ int main(void)
                 rpm_disp[m] = (int16_t)((actual_rpm >= 0) ? (actual_rpm + 0.5f) : (actual_rpm - 0.5f));
                 spd_prev_enc[m] = enc; spd_prev_tick[m] = now;
             }
+
+            /* ═══ 调参工具链: 闭环遥测 (10Hz CSV, 仅 TEL 1 时发射) ═══
+             * 行 "tick,tgt0,rpm0,tgt1,rpm1" — B3 接入契约 v0, 同帧快照
+             * [已知限制] 阻塞发送 ~21ms@9600, 仅整定会话开启; DMA 化后可提频 */
+            if (g_tel_on && (++g_tel_div & 1) == 0) {
+                char tb[44];
+                int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d\r\n",
+                                  (unsigned long)now,
+                                  (int)spd_target[0] * spd_dir[0], (int)rpm_disp[0],
+                                  (int)spd_target[1] * spd_dir[1], (int)rpm_disp[1]);
+                if (tn > 0) tx_raw(tb, tn);
+            }
+            } /* 正常闭环控制 else 段结束 */
         }
 
         /* ③ 每 100ms 刷新显示 + 传感器 */

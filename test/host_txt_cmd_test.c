@@ -115,6 +115,20 @@ int main(void)
     check(txt_cmd_parse("STOP", &tc) && tc.type == TXTCMD_STOP, "STOP 仍优先匹配");
     check(!txt_cmd_parse("SX 1", &tc),                        "SX 仍拒绝");
 
+    /* ---- 调参工具链 (STEP 开环阶跃 / TEL 遥测) ---- */
+    check(txt_cmd_parse("STEP 0 300 2000", &tc) && tc.type == TXTCMD_STEP &&
+          tc.i0 == 0 && tc.i1 == 300 && tc.i2 == 2000,        "STEP 0 300 2000");
+    check(txt_cmd_parse("STEP 1 -500 1500", &tc) && tc.i0 == 1 && tc.i1 == -500 &&
+          tc.i2 == 1500,                                      "STEP 1 -500 1500 负千分比");
+    check(!txt_cmd_parse("STEP 2 300 2000", &tc),             "STEP 非法id -> 拒绝");
+    check(!txt_cmd_parse("STEP 0 300", &tc),                  "STEP 缺参数 -> 拒绝");
+    check(!txt_cmd_parse("STEP 0 300 x", &tc),                "STEP 非数字 -> 拒绝");
+    check(!txt_cmd_parse("STEPX 0 1 2", &tc),                 "STEPX 仍拒绝");
+    check(txt_cmd_parse("TEL 1", &tc) && tc.type == TXTCMD_TEL && tc.i0 == 1, "TEL 1");
+    check(txt_cmd_parse("TEL 0", &tc) && tc.type == TXTCMD_TEL && tc.i0 == 0, "TEL 0");
+    check(!txt_cmd_parse("TEL", &tc),                         "TEL 无参数 -> 拒绝");
+    check(!txt_cmd_parse("TELA 1", &tc),                      "TELA 仍拒绝");
+
     /* ---- 兜底 ---- */
     check(!txt_cmd_parse("", &tc),                            "空串 -> 拒绝");
     check(!txt_cmd_parse("HELLO", &tc),                       "HELLO -> 拒绝");

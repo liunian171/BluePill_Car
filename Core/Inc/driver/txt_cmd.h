@@ -25,6 +25,9 @@
  *   SV <deg>          舵机转向角 (输出域绝对角, 直行 = -90)
  *   SV+ / SV-         舵机微步 (±1°)
  *   SL/SR/SC <deg>    左限/右限/直行位标定 (RAM 生效)
+ *   STEP <id> <u> <t> 开环阶跃测试 (id 0/1, u=千分比±1000, t=时长ms 100~5000;
+ *                     数值范围由 main 分发层校验, 语法 + id 域在此校验)
+ *   TEL 0/1           闭环遥测开关 (10Hz CSV)
  */
 
 #ifndef __TXT_CMD_H__
@@ -54,6 +57,10 @@ typedef enum {
     TXTCMD_SERVO,       /* f0=角度(°) 输出域绝对角 */
     TXTCMD_SERVO_NUDGE, /* i0=+1/-1 (微步) */
     TXTCMD_SERVO_LIM,   /* i0: 0=SL左限 1=SR右限 2=SC中位修正, f0=值 */
+
+    /* ---- 调参工具链 (可开关, 默认关) ---- */
+    TXTCMD_STEP,        /* i0=id(0/1), i1=rate_0E3(±1000), i2=时长ms — 开环阶跃测试 */
+    TXTCMD_TEL,         /* i0=0/1 — 闭环遥测开关 (10Hz CSV) */
 } TxtCmdType;
 
 typedef struct {
