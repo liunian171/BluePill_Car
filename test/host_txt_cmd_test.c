@@ -117,9 +117,10 @@ int main(void)
 
     /* ---- 调参工具链 (STEP 开环阶跃 / TEL 遥测) ---- */
     check(txt_cmd_parse("STEP 0 300 2000", &tc) && tc.type == TXTCMD_STEP &&
-          tc.i0 == 0 && tc.i1 == 300 && tc.i2 == 2000,        "STEP 0 300 2000");
-    check(txt_cmd_parse("STEP 1 -500 1500", &tc) && tc.i0 == 1 && tc.i1 == -500 &&
-          tc.i2 == 1500,                                      "STEP 1 -500 1500 负千分比");
+          tc.i0 == 0 && tc.i1 == 300 && tc.i2 == 2000 && tc.i3 == 1,
+          "STEP 0 300 2000 (div 缺省=1)");
+    check(txt_cmd_parse("STEP 1 -500 1500 2", &tc) && tc.i0 == 1 && tc.i1 == -500 &&
+          tc.i2 == 1500 && tc.i3 == 2,                        "STEP 1 -500 1500 2 (10Hz 分频)");
     check(!txt_cmd_parse("STEP 2 300 2000", &tc),             "STEP 非法id -> 拒绝");
     check(!txt_cmd_parse("STEP 0 300", &tc),                  "STEP 缺参数 -> 拒绝");
     check(!txt_cmd_parse("STEP 0 300 x", &tc),                "STEP 非数字 -> 拒绝");

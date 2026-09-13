@@ -14,6 +14,7 @@ import sys, time, os, serial
 def main():
     port, motor, rate, dur, outfile = (sys.argv[1], int(sys.argv[2]), int(sys.argv[3]),
                                        int(sys.argv[4]), sys.argv[5])
+    div = int(sys.argv[6]) if len(sys.argv) > 6 else 1   # 遥测分频: 2=10Hz (弱链路防丢行)
     ser = serial.Serial(port, 9600, timeout=0.1)
     time.sleep(0.5); ser.reset_input_buffer()
 
@@ -27,7 +28,7 @@ def main():
 
     send("LA 0"); send("L 0"); time.sleep(0.3); ser.reset_input_buffer()
 
-    send(f"STEP {motor} {rate} {dur}")
+    send(f"STEP {motor} {rate} {dur} {div}")
     data, ended, t_end = [], False, time.time() + dur / 1000.0 + 5.0
     while time.time() < t_end and not ended:
         for raw in ser.readlines():

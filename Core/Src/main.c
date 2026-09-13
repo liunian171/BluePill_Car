@@ -77,6 +77,8 @@ static uint32_t     g_step_end      = 0;       /* 阶跃结束 tick */
 static int32_t      g_step_prev_enc = 0;
 static uint32_t     g_step_prev_tick= 0;
 static uint8_t      g_step_first    = 1;       /* 首帧测速基准初始化标志 */
+static uint8_t      g_step_div      = 1;       /* 遥测分频: 1=20Hz 2=10Hz (弱链路降频防丢行) */
+static uint8_t      g_step_cnt      = 0;       /* 遥测分频计数 */
 static uint8_t      g_tel_on        = 0;       /* 闭环遥测开关 (10Hz CSV, 阻塞发送, 仅整定会话开启) */
 static uint8_t      g_tel_div       = 0;       /* 50ms→100ms 分频 */
 /* USER CODE END PV */
@@ -463,7 +465,8 @@ int main(void)
                     case TXTCMD_STEP: {
                         if (g_step_active) { ack("STEP BUSY\r\n"); cmd_note("STEP BUSY"); break; }
                         if (tc.i0 < 0 || tc.i0 > 1 || tc.i1 < -1000 || tc.i1 > 1000 ||
-                            tc.i2 < 100 || tc.i2 > 5000) { ack("STEP BAD\r\n"); cmd_note("STEP BAD"); break; }
+                            tc.i2 < 100 || tc.i2 > 5000 ||
+                            tc.i3 < 1 || tc.i3 > 4) { ack("STEP BAD\r\n"); cmd_note("STEP BAD"); break; }
                         /* 台架安全前置: 关巡线+关自动, 双轮刹停, PID 复位 */
                         line_follower_enable(0);
                         line_follower_set_auto(0);
@@ -471,12 +474,14 @@ int main(void)
                         motor_bridge_brake(0); motor_bridge_brake(1);
                         g_step_m      = (uint8_t)tc.i0;
                         g_step_rate   = (int16_t)tc.i1;
+                        g_step_div    = (uint8_t)tc.i3;
+                        g_step_cnt    = 0;
                         g_step_t0     = HAL_GetTick();
                         g_step_end    = g_step_t0 + (uint32_t)tc.i2;
                         g_step_first  = 1;
                         g_step_active = 1;
                         cmd_note("STEP%d %d", g_step_m, g_step_rate);
-                        ack("STEP GO %d %d %d\r\n", tc.i0, tc.i1, tc.i2);
+                        ack("STEP GO %d %d %d %d\r\n", tc.i0, tc.i1, tc.i2, tc.i3);
                         break;
                     }
                     case TXTCMD_TEL:
@@ -527,13 +532,16 @@ int main(void)
                     if (delta >  30000) delta -= 65536;
                     if (delta < -30000) delta += 65536;
                     float actual_rpm = (float)delta * 60.0f / (dt * (float)ppr) * (float)enc_fb_sign[g_step_m];
-                    int rpm10 = (int)((actual_rpm >= 0) ? (actual_rpm * 10.0f + 0.5f)
-                                                        : (actual_rpm * 10.0f - 0.5f));
-                    char tb[36];
-                    int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d\r\n",
-                                      (unsigned long)(now - g_step_t0), (int)g_step_rate, rpm10);
-                    if (tn > 0) tx_raw(tb, tn);  /* [已知限制] 阻塞发送 ~16ms@9600, 开环测试可容忍; DMA 化见 P1-6 */
                     g_step_prev_enc = enc; g_step_prev_tick = now;
+                    /* 遥测分频发射: 弱链路(如 BLE 桥)20Hz 会系统性丢行, div=2 → 10Hz */
+                    if ((++g_step_cnt % g_step_div) == 0) {
+                        int rpm10 = (int)((actual_rpm >= 0) ? (actual_rpm * 10.0f + 0.5f)
+                                                            : (actual_rpm * 10.0f - 0.5f));
+                        char tb[36];
+                        int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d\r\n",
+                                          (unsigned long)(now - g_step_t0), (int)g_step_rate, rpm10);
+                        if (tn > 0) tx_raw(tb, tn);  /* [已知限制] 阻塞发送 ~16ms@9600, 开环测试可容忍; DMA 化见 P1-6 */
+                    }
                 }
             }
             /* ═══ 正常闭环控制 (阶跃激活时整段旁路) ═══ */

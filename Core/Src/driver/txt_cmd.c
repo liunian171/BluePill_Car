@@ -100,15 +100,17 @@ int txt_cmd_parse(const char *s, TxtCmd *o)
         return 1;
     }
 
-    /* ---- STEP <id> <rate_0E3> <dur_ms> (调参: 开环阶跃测试) ----
-     * 数值范围校验在 main 分发层 (需 ack 错误码), 此处只做语法 + id 域 */
+    /* ---- STEP <id> <rate_0E3> <dur_ms> [div] (调参: 开环阶跃测试) ----
+     * 数值范围校验在 main 分发层 (需 ack 错误码), 此处只做语法 + id 域;
+     * div 可选遥测分频: 1=20Hz(默认) 2=10Hz — 弱链路(BLE 桥)下降频防丢行 */
     if (strncmp(p, "STEP", 4) == 0) {
         const char *q = p + 4;
-        int id, u, t;
+        int id, u, t, div;
         if (!parse_int(&q, &id) || id < 0 || id > 1) return 0;
         if (!parse_int(&q, &u) || !parse_int(&q, &t)) return 0;
+        if (!parse_int(&q, &div)) div = 1;
         o->type = TXTCMD_STEP;
-        o->i0 = id; o->i1 = u; o->i2 = t;
+        o->i0 = id; o->i1 = u; o->i2 = t; o->i3 = div;
         return 1;
     }
 
