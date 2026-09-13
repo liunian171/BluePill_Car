@@ -71,7 +71,7 @@ Core/Src/driver/
   ├─ 桥接层   motor_bridge/servo_bridge/oled_bridge/imu_bridge ← C 门面: 查 id → 转发
   ├─ 组件层   决策: line_follower.c(巡线状态机)                ← 物理量→运动意图
   │          感知: 姿态/巡线感知（待从 imu_bridge/line_follower 拆出）← 裸数→物理量
-  │          执行: steering.c(转向) ✅已建 / 速度环（待从 main 拆出）← 意图→器件级目标
+  │          执行: steering.c(转向) / speed_loop.c(速度环) ✅ 均已成 ← 意图→器件级目标
   │          解析: txt_cmd.c(文本命令) uart_cmd_parser.c(协议帧, 死代码待处置)
   ├─ 执行对象层 motor.cpp servo.cpp (旧称功能对象)               ← 器件级目标→器件语言
   ├─ 器件层   TB6612MotorProtocol / PWMServoProtocol / MPU6050(IIMU) (旧称业务对象) ← 器件翻译
@@ -191,8 +191,10 @@ while(1):
 - [x] ② **P0-2 带符号测速** ✅ `9c926c3`；M1 镜像取反修正 `8f21a2d`
 - [x] ③ **遥测通道** ✅ `fa012ad`（实际实现为 **10Hz CSV 文本** `TEL 1`，**不是** FireWater 二进制帧）
 - [x] ④ 阶跃测试命令（`STEP`）+ PC 辨识脚本 + 操作规范 ✅ `fa012ad`/`778244b`/`4f8305d`；M0/M1 模型辨识完成 `4ede7bf`
-- [ ] ⑤ **C2 抽 `speed_loop`** ← **下一步**（用遥测曲线做搬迁前后比对；契约含 `get_state`/`set_gains`/输出注入）
-- [ ] ⑥ 自查项 N1~N3 / C1 桥接层契约（死代码清理 ✅ 已执行，见"代码卫生"）
+- [x] ⑤ **C2 抽 `speed_loop`** ✅ **2026-09-13 完成**：`Core/Inc/driver/speed_loop.h` + `Core/Src/driver/speed_loop.c`（纯 C / 零 HAL / 输出·刹停·编码器读全注入 / tick 外部化）；`main.c` 删 13 个符号、只留标定表 `g_spd_cfg` + 3 个 IO 绑定，**连 `common/pid.h` 不再 include**
+      证据：PC 桩 `test/host_speed_loop_test.c` **54/54**；阶跃搬迁前后稳态 **196.3→197.0 RPM（0.36%）**；真机 M0/M1/倒车 30RPM + 增益读回全过；Flash 45848B(69.96%) / RAM 6248B(30.51%)
+      顺带修掉旧 bug：`PID_SET`/`SWAP`/OLED 页5 改为从组件读真值 → **二进制 `0xE0` 改参后不再回显陈旧的 ×100 镜像**（真机已验证）
+- [ ] ⑥ **C1 桥接层契约** ← **下一步**（自查项 N1~N3 与死代码清理均 ✅ 已完成）
 - 顺序理由：**P0 修复与 C2 搬迁范围重叠**（PID 段、测速段都在那 ~50 行里）→ 先修后搬是唯一不返工路径，详见 `doc/调参工具链规划.md` §7
 
 **舵机链收尾**（详 `doc/舵机代码结构对照分析.md` §8）
