@@ -127,7 +127,10 @@ void ImuFilter::mahony_filter(float gx, float gy, float gz,
 
         halfex = (ay * halfvz - az * halfvy) * accel_gain;
         halfey = (az * halfvx - ax * halfvz) * accel_gain;
-        halfez = (ax * halfvy - ay * halfvx) * accel_gain;
+        halfez = 0.0f;   /* IMU-only(无磁力计): 重力无航向信息, yaw 修正必须清零。
+                          * 否则倾斜态的 e_z 虚假修正把 yaw 拉回 → 真机实证(2026-09-14):
+                          * 转 90° yaw 爬到 ~40° 后自行回落到 0, 静置不漂(水平时 â=v,e=0)。
+                          * yaw 修正后纯靠陀螺积分(启动偏置校准已消零偏)。 */
     }
 
     /* ================================================================
