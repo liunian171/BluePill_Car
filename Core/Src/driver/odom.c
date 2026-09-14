@@ -45,6 +45,7 @@ odom_ret_t odom_init(const odom_cfg_t *cfg, const odom_io_t *io)
         if (cfg->sign[i] == 0)     return ODOM_ERR_BAD_CFG;
     }
     if (!(cfg->wheel_circ_mm > 0.0f)) return ODOM_ERR_BAD_CFG;
+    if (cfg->yaw_sign != 1 && cfg->yaw_sign != -1) return ODOM_ERR_BAD_CFG;
     /* 编码器差分 Δθ 模式必须给轮距；IMU 模式不要求 */
     if (io->get_yaw == NULL && !(cfg->wheel_track_mm > 0.0f))
         return ODOM_ERR_BAD_CFG;
@@ -109,10 +110,11 @@ odom_ret_t odom_update(uint32_t now_ms, odom_delta_t *out)
     float ds  = (dmm[0] + dmm[1]) * 0.5f;         /* 中点弧长 */
     float dth;
     if (g_io.get_yaw != NULL) {
-        /* ---- ②a Δθ = IMU yaw 差分（主路径：打滑不影响航向） ---- */
+        /* ---- ②a Δθ = IMU yaw 差分（主路径：打滑不影响航向）----
+         * yaw_sign 适配安装方向：对外恒为"逆时针为正"（数学惯例/ROS 一致） */
         float yaw;
         g_io.get_yaw(&yaw);
-        dth = wrap_180(yaw - g_last_yaw);
+        dth = wrap_180(yaw - g_last_yaw) * (float)g_cfg.yaw_sign;
         g_last_yaw = yaw;
     } else {
         /* ---- ②b 回退：编码器差分（track 有 b=dr-dl/rad 关系） ---- */

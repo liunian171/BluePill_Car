@@ -162,6 +162,8 @@ static const odom_cfg_t g_odom_cfg = {
     .wheel_track_mm  = 0.0f,                 /* 轮距 ⚠️ 待标定 — 本车走 IMU yaw 差分, 不参与 */
     .enc_span        = 65536.0f,
     .sign            = { 1, -1 },            /* ⚠️ 必须镜像 g_spd_cfg.ch[].fb_sign (E2 接反) */
+    .yaw_sign        = -1,                   /* MPU6050 安装实测 yaw 顺时针为正 → 取反成"逆时针为正"
+                                              * (2026-09-14 真机: 顺时针转车头 yaw +16.5°, 见开发跟踪 R-1) */
 };
 static int32_t odom_io_read_enc(uint8_t id)
 {

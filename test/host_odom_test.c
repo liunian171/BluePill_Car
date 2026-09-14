@@ -50,6 +50,7 @@ static odom_cfg_t base_cfg(void)
     c.wheel_track_mm = 170.0f;            /* 仅编码器差分模式用, 占位值 */
     c.enc_span = 65536;
     c.sign[0] = 1; c.sign[1] = -1;        /* 镜像 g_spd_cfg.fb_sign */
+    c.yaw_sign = 1;                       /* 默认同向; 反向装引用例单独覆盖 */
     return c;
 }
 
@@ -70,6 +71,8 @@ int main(void)
         check(odom_init(&c, &io) == ODOM_ERR_BAD_CFG, "sign=0 → BAD_CFG");
         c = base_cfg(); c.wheel_circ_mm = 0;
         check(odom_init(&c, &io) == ODOM_ERR_BAD_CFG, "circ<=0 → BAD_CFG");
+        c = base_cfg(); c.yaw_sign = 0;
+        check(odom_init(&c, &io) == ODOM_ERR_BAD_CFG, "yaw_sign 非±1 → BAD_CFG");
         /* 编码器差分模式必须有轮距 */
         c = base_cfg(); c.wheel_track_mm = 0;
         odom_io_t io2 = { .read_enc = stub_enc, .get_yaw = NULL };
@@ -113,6 +116,19 @@ int main(void)
         g_yaw_stub = -179.0f;
         odom_update(50, &d);
         check(feq(d.dtheta_deg, 2.0f, 0.001f), "yaw 回绕: Δθ = +2°");
+    }
+
+    /* ---- ④b yaw_sign = -1（本车 MPU6050 安装: yaw 顺时针为正, 2026-09-14 真机实测）----
+     * IMU yaw +30°(顺时针) → 车体 Δθ 应为 -30°(顺时针为负) */
+    {
+        odom_cfg_t c = base_cfg();
+        odom_io_t  io = { .read_enc = stub_enc, .get_yaw = stub_yaw };
+        c.yaw_sign = -1;
+        g_enc_stub[0] = 0; g_enc_stub[1] = 0; g_yaw_stub = 10.0f;
+        odom_init(&c, &io); odom_resync(0);
+        g_yaw_stub = 40.0f;
+        odom_update(50, &d);
+        check(feq(d.dtheta_deg, -30.0f, 0.001f), "yaw_sign=-1: yaw+30° → Δθ = -30°");
     }
 
     /* ---- ② 编码器回绕：计数从 65530 → 10（真实增量 +16, 校正避免 -65520） ---- */
