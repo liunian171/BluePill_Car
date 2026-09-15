@@ -147,6 +147,28 @@ int main(void)
     check(!txt_cmd_parse("WD", &tc),                          "WD 无参数 -> 拒绝");
     check(!txt_cmd_parse("WDX 100", &tc),                     "WDX 仍拒绝");
 
+    /* ---- IMU 调试工具链 (2026-09-15): ITEL/IGAIN/IDRIFT/IRATE/ICAL ---- */
+    check(txt_cmd_parse("ITEL 1", &tc) && tc.type == TXTCMD_ITEL && tc.i0 == 1, "ITEL 1");
+    check(txt_cmd_parse("ITEL 0", &tc) && tc.type == TXTCMD_ITEL && tc.i0 == 0, "ITEL 0");
+    check(!txt_cmd_parse("ITEL", &tc),                        "ITEL 无参数 -> 拒绝");
+    check(!txt_cmd_parse("ITELA 1", &tc),                     "ITELA 仍拒绝");
+    check(txt_cmd_parse("IGAIN 50 0", &tc) && tc.type == TXTCMD_IGAIN &&
+          tc.i0 == 50 && tc.i1 == 0,                          "IGAIN 50 0 (默认 Kp=0.5 Ki=0)");
+    check(txt_cmd_parse("IGAIN 0 0", &tc) && tc.i0 == 0 && tc.i1 == 0, "IGAIN 0 0 (E2 纯积分)");
+    check(!txt_cmd_parse("IGAIN 50", &tc),                    "IGAIN 缺第二参数 -> 拒绝");
+    check(!txt_cmd_parse("IGAIN x 0", &tc),                   "IGAIN 非数字 -> 拒绝");
+    check(txt_cmd_parse("IDRIFT 0", &tc) && tc.type == TXTCMD_IDRIFT && tc.i0 == 0, "IDRIFT 0 (E1 实验)");
+    check(txt_cmd_parse("IDRIFT 1", &tc) && tc.i0 == 1,       "IDRIFT 1 (恢复)");
+    check(!txt_cmd_parse("IDRIFT", &tc),                      "IDRIFT 无参数 -> 拒绝");
+    check(!txt_cmd_parse("IDRIFTA 0", &tc),                   "IDRIFTA 仍拒绝");
+    check(txt_cmd_parse("IRATE 50", &tc) && tc.type == TXTCMD_IRATE && tc.i0 == 50, "IRATE 50 (E3 实验)");
+    check(txt_cmd_parse("IRATE 100", &tc) && tc.i0 == 100,    "IRATE 100 (默认)");
+    check(!txt_cmd_parse("IRATE", &tc),                       "IRATE 无参数 -> 拒绝");
+    check(!txt_cmd_parse("IRATEX 50", &tc),                   "IRATEX 仍拒绝");
+    check(txt_cmd_parse("ICAL", &tc) && tc.type == TXTCMD_ICAL, "ICAL 无参数精确匹配");
+    check(!txt_cmd_parse("ICAL 1", &tc),                      "ICAL 带参数 -> 拒绝 (无参数命令)");
+    check(!txt_cmd_parse("ICALX", &tc),                       "ICALX 仍拒绝");
+
     /* ---- 兜底 ---- */
     check(!txt_cmd_parse("", &tc),                            "空串 -> 拒绝");
     check(!txt_cmd_parse("HELLO", &tc),                       "HELLO -> 拒绝");

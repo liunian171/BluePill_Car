@@ -140,6 +140,16 @@ static uint8_t      g_step_cnt      = 0;       /* 遥测分频计数 */
 static uint8_t      g_tel_on        = 0;       /* 闭环遥测开关 (10Hz CSV, 阻塞发送, 仅整定会话开启) */
 static uint8_t      g_tel_div       = 0;       /* 50ms→100ms 分频 */
 
+/* ==== IMU 调试工具链 (2026-09-15, 照调参工具链模式: 可开关, 默认关; ITEL 随 STOP 关) ====
+ * 背景: IMU-1 yaw 失真专案 (转 90° 只跟 ~20° 且回落) — 首嫌疑 = 漂移补偿把旋转误当零偏
+ * (PC 仿真证实机理, tools/imu_sim_verify.py + doc/IMU调试工具链规划.md §3)。
+ * ITEL 行: tick,gx10,gy10,gz10(°/s×10),roll10,pitch10,yaw10(°×10),stable,driftz100
+ * 带宽: ~45B/行 @5Hz ≈ 225B/s (23%@9600) — 弱链路可用; IRATE 50 时 10Hz 需注意 */
+static uint8_t      g_itel_on       = 0;       /* IMU 姿态遥测开关 */
+static uint8_t      g_itel_div      = 0;       /* 更新节拍 2 分频 (默认 5Hz) */
+static uint16_t     g_imu_period_ms = 100;     /* IMU 更新周期 (IRATE 20~1000, 默认=原 100ms 块) */
+static uint32_t     t_imu           = 0;       /* IMU 更新节拍基准 */
+
 /* ==== 上位机对接 (2026-09-14): 里程计上报 + 命令看门狗 ====
  * 上行二进制帧 (复用 0xAA...FFFF 帧体系, 无校验 — 需求方确认只要增量+时间戳):
  *   ODOM 0x51: 帧头|ΔX|ΔY|Δθ|ts_ms|FFFF = 20B @20Hz (50ms, 与控制环同拍)
@@ -433,6 +443,7 @@ int main(void)
                         /* 调参工具链随急停关闭 (阶跃测试中途=安全终止, 遥测/记录回默认关) */
                         g_step_active = 0; g_tel_on = 0; g_rec_on = 0;
                         g_odom_on = 0;    /* 上位机对接上报同样关闭 (看门狗保持武装) */
+                        g_itel_on = 0;    /* IMU 遥测同属调试通道, 一并关闭 */
                         cmd_note("STOP ALL");
                         ack("STOP OK LINE OFF\r\n");
                         break;
@@ -638,6 +649,39 @@ int main(void)
                         cmd_note("WD %dms", tc.i0);
                         ack("WD:%d\r\n", tc.i0);
                         break;
+
+                    /* ---- IMU 工具链 (解析域校验在 txt_cmd, 数值域在此; 执行端 = imu_bridge) ---- */
+                    case TXTCMD_ITEL:
+                        g_itel_on = tc.i0 ? 1 : 0;
+                        g_itel_div = 0;   /* 开/关都对齐分频相位 */
+                        cmd_note("ITEL %d", g_itel_on);
+                        ack("ITEL:%d\r\n", g_itel_on);
+                        break;
+                    case TXTCMD_IGAIN:
+                        /* Mahony 增益 ×100 (RAM 生效, 断电失); 允许 0 0 = 纯陀螺积分 (E2 实验) */
+                        if (tc.i0 < 0 || tc.i1 < 0) { ack("IGAIN BAD\r\n"); cmd_note("IGAIN BAD"); break; }
+                        (void)imu_bridge_set_mahony_gains(0, tc.i0 / 100.0f, tc.i1 / 100.0f);
+                        cmd_note("IGAIN %d %d", tc.i0, tc.i1);
+                        ack("IGAIN:%d %d\r\n", tc.i0, tc.i1);
+                        break;
+                    case TXTCMD_IDRIFT:
+                        if (tc.i0 < 0 || tc.i0 > 1) { ack("IDRIFT BAD\r\n"); cmd_note("IDRIFT BAD"); break; }
+                        (void)imu_bridge_set_drift_enable(0, (uint8_t)tc.i0);
+                        cmd_note("IDRIFT %d", tc.i0);
+                        ack("IDRIFT:%d\r\n", tc.i0);
+                        break;
+                    case TXTCMD_IRATE:
+                        if (tc.i0 < 20 || tc.i0 > 1000) { ack("IRATE BAD\r\n"); cmd_note("IRATE BAD"); break; }
+                        g_imu_period_ms = (uint16_t)tc.i0;
+                        cmd_note("IRATE %d", tc.i0);
+                        ack("IRATE:%d\r\n", tc.i0);
+                        break;
+                    case TXTCMD_ICAL:
+                        /* 前置: 车体静止水平; 之后 50 拍(默认5s)校准, 完成后 yaw 归零 */
+                        if (imu_bridge_recalibrate(0) != BRIDGE_OK) { ack("ICAL BAD\r\n"); cmd_note("ICAL BAD"); break; }
+                        cmd_note("ICAL GO");
+                        ack("ICAL:GO\r\n");
+                        break;
                     default:
                         break;
                     }
@@ -772,6 +816,32 @@ int main(void)
             } /* 正常闭环控制 else 段结束 */
         }
 
+        /* ③b IMU 感知更新 — 独立节拍 (IRATE 可调, 默认 100ms = 原 100ms 显示块节拍)
+         * 从显示块拆出: ① 更新周期可调 (E3 实验: 10Hz 快转漏角对照) ② 不受显示跳拍影响;
+         * ITEL 遥测随更新发射, 2 分频 (默认 5Hz, ~45B/行 ≈ 23%@9600) */
+        if (now - t_imu >= g_imu_period_ms) {
+            t_imu = now;
+            (void)imu_bridge_update_filter(0, now);
+            if (g_itel_on && (++g_itel_div & 1) == 0) {
+                int16_t gx, gy, gz;
+                float drx, dry, drz, gs = imu_bridge_gyro_scale(0);   /* LSB/(°/s) */
+                float r = imu_bridge_get_roll(0), p = imu_bridge_get_pitch(0), y = imu_bridge_get_yaw(0);
+                float d10 = 10.0f, d100 = 100.0f;
+                if (imu_bridge_read_gyro_raw(0, &gx, &gy, &gz) != BRIDGE_OK) { gx = gy = gz = 0; }
+                (void)imu_bridge_get_drift(0, &drx, &dry, &drz);
+                char tb[52];
+                int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
+                                  (unsigned long)now,
+                                  (int)(gx * d10 / gs), (int)(gy * d10 / gs), (int)(gz * d10 / gs),
+                                  (int)((r < 0) ? (r * d10 - 0.5f) : (r * d10 + 0.5f)),
+                                  (int)((p < 0) ? (p * d10 - 0.5f) : (p * d10 + 0.5f)),
+                                  (int)((y < 0) ? (y * d10 - 0.5f) : (y * d10 + 0.5f)),
+                                  (int)imu_bridge_stable(0),
+                                  (int)((drz < 0) ? (drz * d100 - 0.5f) : (drz * d100 + 0.5f)));
+                if (tn > 0) tx_raw(tb, tn);
+            }
+        }
+
         /* ③ 每 100ms 刷新显示 + 传感器
          * [OLED 分页轮转] 每 100ms 只刷 1 页 (8 页 800ms 轮完) — I2C2 异常时每页
          * ~10ms 超时, 8 页连刷曾阻塞主循环 ~850ms/圈 → 控制环掉到 1Hz (2026-09-13
@@ -779,8 +849,7 @@ int main(void)
         if (now - t_disp >= 100) {
             t_disp = HAL_GetTick();
 
-            /* 读传感器 (IMU 事务带 10ms 超时, 可接受)；时间基准传入（义务 5） */
-            (void)imu_bridge_update_filter(0, now);
+            /* 读传感器 (IMU 已在 ③b 独立节拍更新, 此处只取缓存值刷新显示) */
             float roll  = imu_bridge_get_roll(0);
             float pitch = imu_bridge_get_pitch(0);
             float yaw   = imu_bridge_get_yaw(0);

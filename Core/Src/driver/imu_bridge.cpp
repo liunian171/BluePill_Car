@@ -39,6 +39,10 @@ static uint8_t    g_cal_cnt[MAX_IMUS]     = {0};
 static float      g_gb_drift[MAX_IMUS][3] = {{0}};
 static uint32_t   g_stable_since[MAX_IMUS] = {0};
 
+/* ---- IMU 工具链状态 (2026-09-15): 漂移补偿开关 / 最近一拍静止标志 ---- */
+static uint8_t    g_drift_en[MAX_IMUS]    = {1, 1, 1, 1};   /* 默认开 = 现有行为 */
+static uint8_t    g_is_stable[MAX_IMUS]   = {0};
+
 #define IMU_CAL_SAMPLES   50    /* 初始零偏校准采样次数 */
 #define IMU_CAL_DONE      101   /* 完成标志（>50 即视为完成，沿用原语义） */
 
@@ -70,6 +74,8 @@ bridge_ret_t imu_bridge_init(uint8_t id, const imu_bridge_cfg_t *cfg)
     for (int i = 0; i < 3; i++) { g_gb_sum[id][i] = 0; g_gb_drift[id][i] = 0.0f; }
     g_cal_cnt[id] = 0;
     g_stable_since[id] = 0;
+    g_drift_en[id]     = 1;      /* 工具链开关恢复默认 (init = 上电态) */
+    g_is_stable[id]    = 0;
     imu_last_tick[id]  = 0;
 
     /* 滤波器系数 — 默认 Kp=0.5, Ki=0（运行时漂移补偿代替积分项） */
@@ -200,8 +206,17 @@ bridge_ret_t imu_bridge_update_filter(uint8_t id, uint32_t now_ms)
     /* 用加速度模值判断静止：|accel - 1g| < 0.05g → 设备没动 */
     float amag = sqrtf(af[0]*af[0] + af[1]*af[1] + af[2]*af[2]);
     int is_stable = (fabsf(amag - 1.0f) < 0.05f);
+    g_is_stable[id] = (uint8_t)(is_stable ? 1 : 0);   /* ITEL 诊断列 */
 
-    if (is_stable) {
+    /* ⚠️ 已知缺陷 (IMU-1 yaw 失真首嫌疑, 2026-09-15 仿真证实机理, 见
+     * doc/IMU调试工具链规划.md §3): 绕竖直轴慢转时 |a|≈1g → 误判"静止",
+     * 漂移跟踪把旋转角速度当零偏吸收 → yaw 积分冻结 + 停转后回落。
+     * 临时对策 = IDRIFT 命令关补偿 (E1 实验); 永久修法 = 陀螺模值门限 (E1 证实后落地) */
+    if (!g_drift_en[id]) {
+        for (int i = 0; i < 3; i++) g_gb_drift[id][i] = 0.0f;  /* 关闭即清零: 完全无补偿 */
+    }
+
+    if (is_stable && g_drift_en[id]) {
         if (g_stable_since[id] == 0) g_stable_since[id] = now;
         uint32_t stable_ms = now - g_stable_since[id];
 
@@ -244,5 +259,51 @@ bridge_ret_t imu_bridge_set_mahony_gains(uint8_t id, float kp, float ki)
     if (id >= MAX_IMUS) return BRIDGE_ERR_BAD_ARG;
     if (imu_devices[id] == nullptr) return BRIDGE_ERR_NOT_INIT;
     imu_filters[id].set_mahony_gains(kp, ki);
+    return BRIDGE_OK;
+}
+
+/* ---- IMU 工具链 (2026-09-15) ---- */
+
+bridge_ret_t imu_bridge_set_drift_enable(uint8_t id, uint8_t en)
+{
+    if (id >= MAX_IMUS) return BRIDGE_ERR_BAD_ARG;
+    if (imu_devices[id] == nullptr) return BRIDGE_ERR_NOT_INIT;
+    g_drift_en[id] = en ? 1u : 0u;
+    if (!g_drift_en[id]) {
+        /* 关闭瞬间清零补偿量: 下一拍起完全无补偿 (E1 实验语义, 见 update_filter 注) */
+        for (int i = 0; i < 3; i++) g_gb_drift[id][i] = 0.0f;
+    }
+    return BRIDGE_OK;
+}
+
+uint8_t imu_bridge_drift_enabled(uint8_t id)
+{
+    return (id < MAX_IMUS) ? g_drift_en[id] : 0;
+}
+
+bridge_ret_t imu_bridge_recalibrate(uint8_t id)
+{
+    if (id >= MAX_IMUS) return BRIDGE_ERR_BAD_ARG;
+    if (imu_devices[id] == nullptr) return BRIDGE_ERR_NOT_INIT;
+    /* 复位校准状态机 → update_filter 重新走"50 拍采均值 → init_from_accel"路径 */
+    for (int i = 0; i < 3; i++) { g_gb_sum[id][i] = 0; g_gb_drift[id][i] = 0.0f; }
+    g_cal_cnt[id] = 0;
+    g_stable_since[id] = 0;
+    return BRIDGE_OK;
+}
+
+uint8_t imu_bridge_stable(uint8_t id)
+{
+    return (id < MAX_IMUS) ? g_is_stable[id] : 0;
+}
+
+bridge_ret_t imu_bridge_get_drift(uint8_t id, float *dx, float *dy, float *dz)
+{
+    if (id >= MAX_IMUS || dx == nullptr || dy == nullptr || dz == nullptr)
+        return BRIDGE_ERR_BAD_ARG;
+    if (imu_devices[id] == nullptr) return BRIDGE_ERR_NOT_INIT;
+    *dx = g_gb_drift[id][0];
+    *dy = g_gb_drift[id][1];
+    *dz = g_gb_drift[id][2];
     return BRIDGE_OK;
 }

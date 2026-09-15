@@ -71,6 +71,20 @@ bridge_ret_t imu_bridge_read_gyro_raw(uint8_t id, int16_t *gx, int16_t *gy, int1
 bridge_ret_t imu_bridge_update_filter(uint8_t id, uint32_t now_ms);
 bridge_ret_t imu_bridge_set_mahony_gains(uint8_t id, float kp, float ki);
 
+/* ---- IMU 调试工具链接口 (2026-09-15, 命令端 ITEL/IGAIN/IDRIFT/IRATE/ICAL) ----
+ * 全部可开关/只改 RAM, 不进控制路径; 真静止时的漂移补偿能力保留 (仅关"误吸收"路径) */
+bridge_ret_t imu_bridge_set_drift_enable(uint8_t id, uint8_t en);
+/* 运行时漂移补偿开关 (E1 实验 / 修复验证用)。
+ * 关闭语义: 停止跟踪**并清零**当前补偿值 — 完全无补偿的原始陀螺积分 (E1 要求);
+ * 重新开启后从 0 重新跟踪 */
+uint8_t      imu_bridge_drift_enabled(uint8_t id);     /* 越界/未初始化 → 0 */
+bridge_ret_t imu_bridge_recalibrate(uint8_t id);
+/* 重新触发初始零偏校准 (ICAL): 复位校准状态机 + 清漂移补偿,
+ * 之后的 IMU_CAL_SAMPLES 拍 (默认 50 拍) 需**车体静止**, 完成后自动重初始化四元数 (yaw 归零) */
+uint8_t      imu_bridge_stable(uint8_t id);            /* 最近一拍静止标志 (ITEL 诊断列; 越界→0) */
+bridge_ret_t imu_bridge_get_drift(uint8_t id, float *dx, float *dy, float *dz);
+/* 读当前漂移补偿量 °/s (ITEL 诊断列; 越界/未初始化/参数 NULL → BAD_ARG, 值不写) */
+
 #ifdef __cplusplus
 }
 #endif

@@ -171,6 +171,52 @@ int txt_cmd_parse(const char *s, TxtCmd *o)
         return 1;
     }
 
+    /* ---- ICAL (IMU 工具链: 重新触发零偏校准, 无参数) ---- */
+    if (strcmp(p, "ICAL") == 0) {
+        o->type = TXTCMD_ICAL;
+        return 1;
+    }
+
+    /* ---- ITEL 0/1 (IMU 工具链: 姿态遥测 CSV 开关) ---- */
+    if (strncmp(p, "ITEL", 4) == 0) {
+        const char *q = p + 4;
+        int en;
+        if (!parse_int(&q, &en)) return 0;
+        o->type = TXTCMD_ITEL;
+        o->i0 = en;
+        return 1;
+    }
+
+    /* ---- IGAIN <kp100> <ki100> (IMU 工具链: Mahony 增益 ×100) ---- */
+    if (strncmp(p, "IGAIN", 5) == 0) {
+        const char *q = p + 5;
+        int kp, ki;
+        if (!parse_int(&q, &kp) || !parse_int(&q, &ki)) return 0;
+        o->type = TXTCMD_IGAIN;
+        o->i0 = kp; o->i1 = ki;
+        return 1;
+    }
+
+    /* ---- IDRIFT 0/1 (IMU 工具链: 运行时漂移补偿开关; 范围校验在 main 分发层) ---- */
+    if (strncmp(p, "IDRIFT", 6) == 0) {
+        const char *q = p + 6;
+        int en;
+        if (!parse_int(&q, &en)) return 0;
+        o->type = TXTCMD_IDRIFT;
+        o->i0 = en;
+        return 1;
+    }
+
+    /* ---- IRATE <ms> (IMU 工具链: 更新周期; 范围 20~1000 校验在 main 分发层) ---- */
+    if (strncmp(p, "IRATE", 5) == 0) {
+        const char *q = p + 5;
+        int ms;
+        if (!parse_int(&q, &ms)) return 0;
+        o->type = TXTCMD_IRATE;
+        o->i0 = ms;
+        return 1;
+    }
+
     /* ---- MS <rpm> (双电机同步, 必须先于 M0/M1 判定? 无冲突, 位置任意) ---- */
     if (p[0] == 'M' && p[1] == 'S' && p[2] == ' ') {
         const char *q = p + 2;
