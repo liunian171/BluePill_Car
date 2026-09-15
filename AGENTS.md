@@ -20,8 +20,8 @@
 
 - **代码权威源**: 本仓库 `Core/`（CubeMX + CMake + Ninja 工程）——一手真相
 - **文档区**: `doc/`（架构/调试/巡线设计/移植，见 §六 索引）；`backup/` 为历史备份，只读
-- **状态（2026-09-15）**: 基础驱动链路全通（电机/编码器/IMU/OLED/串口/灰度）；**执行栈两侧组件已组件化**（`steering` 转向 ✅真机 / `speed_loop` 速度环 ✅真机）；**桥接层家族契约关键项真机通过**（`M1 30` 不发散 + SV 链回归，⬜ 剩故障注入）；**上位机对接批次落地并真机验证**（odom 组件 + ODOM/ATT 帧 + 看门狗 + 0x20，实转回归 14/14）；闭环调参工具链可用；巡线状态机已集成（实车整定未做）；上位机对接规范见 `README.md`
-- **下次开工第一件事**: 🔴 **IMU yaw 专案**（转 90° 只跟 ~20° 且自行回落，二分方案见调试总结 §20）+ **提速决策**（ODOM 50Hz 需 USART3/USART2 提速，动 `.ioc` 需用户拍板）；当前进度与待办见 `doc/开发跟踪.md` §当前进行中
+- **状态（2026-09-15）**: 基础驱动链路全通（电机/编码器/IMU/OLED/串口/灰度）；**执行栈两侧组件已组件化**（`steering` 转向 ✅真机 / `speed_loop` 速度环 ✅真机）；**感知侧组件化推进中**（`odom` ✅ / `attitude` 姿态 ✅真机（C3，含 `common/imu_filter.c` 纯 C 移植）；巡线感知拆分待做）；**桥接层家族契约关键项真机通过**（`M1 30` 不发散 + SV 链回归，⬜ 剩故障注入）；**上位机对接批次落地并真机验证**（odom 组件 + ODOM/ATT 帧 + 看门狗 + 0x20，实转回归 14/14）；闭环调参工具链 + **IMU 调试工具链**（`ITEL/IGAIN/IDRIFT/IRATE/ICAL` + SOP）可用；**IMU-1 yaw 失真已修复**（漂移补偿陀螺门限，调试总结 §20）；巡线状态机已集成（实车整定未做）；上位机对接规范见 `README.md`
+- **下次开工第一件事**: **提速决策**（ODOM 50Hz 需 USART3/USART2 提速，动 `.ioc` 需用户拍板）+ **C1 故障注入**（P0 唯一未跑项）；当前进度与待办见 `doc/开发跟踪.md` §当前进行中
 
 ## 二、硬件方案（全部已实测确认）
 
@@ -74,7 +74,7 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Debug/BluePill_Car.elf 0x08000000 
 Core/Src/driver/
   ├─ 桥接层   motor_bridge/servo_bridge/oled_bridge/imu_bridge ← C 门面: 查 id → 转发
   ├─ 组件层   决策: line_follower.c(巡线状态机)                ← 物理量→运动意图
-  │          感知: 姿态/巡线感知（待从 imu_bridge/line_follower 拆出）← 裸数→物理量
+  │          感知: attitude.c(姿态 ✅C3 真机) / 巡线感知（待从 line_follower 拆出）← 裸数→物理量
   │          执行: steering.c(转向) / speed_loop.c(速度环) ✅ 均已成 ← 意图→器件级目标
   │          解析: txt_cmd.c(文本命令) + main.c 内联二进制帧分发（原 uart_cmd_parser 死代码已于 2026-09-13 删除）
   ├─ 执行对象层 motor.cpp servo.cpp (旧称功能对象)               ← 器件级目标→器件语言

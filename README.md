@@ -48,7 +48,7 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Release/BluePill_Car.elf 0x0800000
 PC 侧单元测试桩（无需硬件）：
 
 ```powershell
-.\test\run_pc_tests.ps1               # txt_cmd / steering / speed_loop 三组桩
+.\test\run_pc_tests.ps1               # txt_cmd / steering / speed_loop / odom / attitude 五组桩
 ```
 
 ---
