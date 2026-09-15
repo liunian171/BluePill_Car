@@ -163,7 +163,7 @@ while(1):
 | 编码器方向 | M1/E2 方向软件取反；**驱动侧 `drive_sign` 与反馈侧 `fb_sign` 必须镜像**（组装层相邻声明，改一个必须同时改另一个，否则正反馈飞车） |
 | 用 `UART2 Ready` 横幅判断 init 成功 | 横幅在桥 init **之前**发送 → 判据应为 `PING` 有 `PONG`（`Error_Handler()` 会 `__disable_irq()` 死循环 → 无应答） |
 | **蓝牙 SPP"连不上"三态**（2026-09-15，详调试总结 §19） | ① open 立即拒绝=口被僵尸进程占（测试脚本必带 `write_timeout`；工具静默死掉必查 `tasklist` python 残留并 `Stop-Process`）② open 阻塞 20s+=微软栈在建链（正常，调用超时给足 90s）③ 写超时=设备不可达（查板子供电/手机抢占单连接/设置里点"连接"）。BT04 找口：`Get-PnpDevice` InstanceId 匹配 MAC `98DA20045F4F`；配对 PIN `1234` |
-| ⚠️ **本机环境：对 `.git/` 的写入会被拦截/回滚** | 症状：`git fetch` 报 `[new branch]` 但跟踪引用不落地（`[gone]`）、`git update-ref` 返回成功却写不进、`rm` 删 1 个文件却删掉多个（曾一次清空 70 个）→ **对策**：① 删除类操作**逐条执行 + 只看 `git status --short` 校验**（勿用目录文件计数）② 跟踪引用失联时手工写 `.git/packed-refs`（标准格式，两行即可）③ 怀疑杀软实时防护监控了工作区 |
+| ⚠️ **本机环境：对 `.git/` 的写入会被拦截/回滚** | 症状：`git fetch` 报 `[new branch]` 但跟踪引用不落地（`[gone]`）、`git update-ref` 返回成功却写不进、`rm` 删 1 个文件却删掉多个（曾一次清空 70 个）、**`git rm <单文件>` 留 stale `index.lock` + 连带删工作区 35 个无关源文件 + 丢未跟踪新文件**（2026-09-15 实锤）→ **对策**：① **本仓库禁用 `git rm`**——用普通 `rm <单文件>` + `git add` + 即时 `git status --short` 校验 ② 中招处置：`rm .git/index.lock` 清锁 → `git restore -- <目录>` 逐目录恢复 → 未跟踪新文件重写 ③ 跟踪引用失联时手工写 `.git/packed-refs`（标准格式，两行即可）④ 怀疑杀软实时防护监控了工作区 |
 
 ## 六、文档索引
 
