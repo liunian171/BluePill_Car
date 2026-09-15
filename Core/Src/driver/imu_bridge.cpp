@@ -45,6 +45,7 @@ static uint8_t    g_is_stable[MAX_IMUS]   = {0};
 
 #define IMU_CAL_SAMPLES   50    /* 初始零偏校准采样次数 */
 #define IMU_CAL_DONE      101   /* 完成标志（>50 即视为完成，沿用原语义） */
+#define IMU_DRIFT_GYRO_GATE 1.5f  /* 漂移跟踪陀螺门限 °/s: 三轴均低于此才跟踪 (IMU-1 修复) */
 
 bridge_ret_t imu_bridge_init(uint8_t id, const imu_bridge_cfg_t *cfg)
 {
@@ -208,15 +209,25 @@ bridge_ret_t imu_bridge_update_filter(uint8_t id, uint32_t now_ms)
     int is_stable = (fabsf(amag - 1.0f) < 0.05f);
     g_is_stable[id] = (uint8_t)(is_stable ? 1 : 0);   /* ITEL 诊断列 */
 
-    /* ⚠️ 已知缺陷 (IMU-1 yaw 失真首嫌疑, 2026-09-15 仿真证实机理, 见
-     * doc/IMU调试工具链规划.md §3): 绕竖直轴慢转时 |a|≈1g → 误判"静止",
-     * 漂移跟踪把旋转角速度当零偏吸收 → yaw 积分冻结 + 停转后回落。
-     * 临时对策 = IDRIFT 命令关补偿 (E1 实验); 永久修法 = 陀螺模值门限 (E1 证实后落地) */
+    /* IMU-1 yaw 失真修复 (2026-09-15 真机 E1/E1b 实锤): 单靠加速度模值判静止,
+     * 绕竖直轴慢转时 |a|≈1g → 旋转角速度被漂移跟踪当零偏吸收
+     * (真机实据: 90° 只跟 -41.9°, 停转后以 driftz=-5.5°/s 速率指数回落到 0;
+     *  IDRIFT 0 对照: -85.1° 满跟零回落)。修法 = 跟踪进入条件加陀螺模值门限:
+     * 三轴 |gf| 均低于 IMU_DRIFT_GYRO_GATE 才允许跟踪 — 转动中不吸收,
+     * 停稳后只吸收真零偏。代价: <1.5°/s 的极慢旋转 (90°/90s) 仍会被吸收, 可接受 */
     if (!g_drift_en[id]) {
         for (int i = 0; i < 3; i++) g_gb_drift[id][i] = 0.0f;  /* 关闭即清零: 完全无补偿 */
     }
 
+    int track_ok = 0;
     if (is_stable && g_drift_en[id]) {
+        float gmax = fabsf(gf[0]);
+        if (fabsf(gf[1]) > gmax) gmax = fabsf(gf[1]);
+        if (fabsf(gf[2]) > gmax) gmax = fabsf(gf[2]);
+        track_ok = (gmax < IMU_DRIFT_GYRO_GATE);
+    }
+
+    if (track_ok) {
         if (g_stable_since[id] == 0) g_stable_since[id] = now;
         uint32_t stable_ms = now - g_stable_since[id];
 
