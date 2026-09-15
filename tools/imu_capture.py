@@ -31,11 +31,13 @@ def main():
     print("连接 OK (PONG)")
 
     send("ITEL 1")
-    rows, t_end = [], time.time() + secs
+    rows, buf, t_end = [], b"", time.time() + secs
     print(f"采集 {secs}s ...")
     while time.time() < t_end:
-        for raw in ser.readlines():
-            l = raw.decode(errors="ignore").strip()
+        buf += ser.read(512)                       # [坑] readlines() 在 BT04 链路会无声挂死, 用 read() 分块
+        while b"\n" in buf:
+            l, buf = buf.split(b"\n", 1)
+            l = l.decode(errors="ignore").strip()
             p = l.split(",")
             if len(p) == 9 and l[0].isdigit():
                 rows.append(l)

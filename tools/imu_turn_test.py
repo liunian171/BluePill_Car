@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-imu_turn_test.py — IMU yaw 90° 转角协议化测试 (IMU-1 专案 E 系列实验工具)
+imu_turn_test.py — IMU yaw 90° 转角协议化测试 (IMU-1 专案 E 系列实验工具, 自助版)
 
 用法:
-    envs/default/Scripts/python.exe tools/imu_turn_test.py [port] [方向cw/ccw] [outfile]
-    port 缺省读 tools/data/bt_port.txt; outfile 缺省 tools/data/imu_turn_<ts>.csv
+    envs/default/Scripts/python.exe tools/imu_turn_test.py <COM口> [前置命令] [outfile]
+    例:  ... imu_turn_test.py COM7                    # E1 基线 (漂移补偿开)
+         ... imu_turn_test.py COM7 "IDRIFT 0"         # E1b (关漂移补偿)
+         ... imu_turn_test.py COM7 "IGAIN 0 0|IDRIFT 0"  # E2 纯陀螺积分 (|分隔多条)
+         ... imu_turn_test.py COM7 "IRATE 50"          # E3 采样率对照
+    前置命令在连接后、ICAL 之前发送 (用 | 分隔多条); 实验完成后手动恢复:
+    IDRIFT 1 / IGAIN 50 0 / IRATE 100
 
-流程 (全程 ITEL 5Hz):
-    阶段0 静置基线 3s  → 提示手转 90° (匀速, 建议 5~10s) → 阶段1 转角+静置 20s
-    自动分析三指标: 跟随角 / 回落量 / 静置漂移(°/min)
-    交叉验证: gz 积分角 (陀螺侧) vs yaw 输出角 (融合侧) — 定位"哪一侧丢角"
-
-实验序列 (doc/IMU调试工具链规划.md §4.3):
-    E1 基线(默认) → E1b 发 IDRIFT 0 后重跑 → E2 再发 IGAIN 0 0 → E3 发 IRATE 50 重跑
+流程 (全程 ITEL):
+    连接 → [前置命令] → ICAL 重校准(静置 7s) → 基线 5s
+    → 提示手转 90°(匀速 8~10s, 平稳别晃) → 采集 30s → 自动分析
+三指标: 跟随角 / 回落量 / 静置漂移(°/min) + 陀螺侧 gz 积分交叉验证
 """
 import sys, time, os, serial
 
@@ -21,10 +23,12 @@ def port_default():
     return open(f).read().strip() if os.path.exists(f) else "COM15"
 
 def collect(ser, seconds):
-    rows, t_end = [], time.time() + seconds
+    rows, buf, t_end = [], b"", time.time() + seconds
     while time.time() < t_end:
-        for raw in ser.readlines():
-            l = raw.decode(errors="ignore").strip()
+        buf += ser.read(512)                       # [坑] readlines() 在 BT04 链路会无声挂死, 用 read() 分块
+        while b"\n" in buf:
+            l, buf = buf.split(b"\n", 1)
+            l = l.decode(errors="ignore").strip()
             p = l.split(",")
             if len(p) == 9 and l[0].isdigit():
                 try:
@@ -71,24 +75,33 @@ def analyze(rows, label):
 
 def main():
     port = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else port_default()
+    pre_cmd = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].endswith(".csv") else None
     outfile = sys.argv[-1] if sys.argv[-1].endswith(".csv") else \
         f"tools/data/imu_turn_{int(time.time())}.csv"
-    ser = serial.Serial(port, 9600, timeout=0.1)
-    time.sleep(0.5); ser.reset_input_buffer()
+    ser = serial.Serial(port, 9600, timeout=0.5, write_timeout=2)
+    time.sleep(2); ser.reset_input_buffer()
 
-    def send(c): ser.write((c + "\n").encode()); time.sleep(0.05)
+    def send(c):
+        ser.write((c + "\n").encode()); time.sleep(0.05)
 
     send("PING"); time.sleep(0.8)
     if "PONG" not in ser.read(300).decode(errors="ignore"):
         print("FAIL: 无 PONG, 链路不通"); ser.close(); return 1
     print("连接 OK (PONG)")
 
-    print("== 前置: 车体静止水平 (必要时先发 ICAL 重新校准) ==")
+    if pre_cmd:
+        for c in pre_cmd.split("|"):
+            send(c.strip()); time.sleep(0.4)
+            print(f"前置: {c.strip()} -> {ser.read(200).decode(errors='ignore').strip()}")
+
+    print("== ICAL 重校准: 车体平放保持静止 7s ... ==")
+    send("ICAL")
+    rows_cal = collect(ser, 7)
+    print("== 基线采集 5s (保持静止) ==")
     send("ITEL 1")
-    print("阶段0: 静置基线 3s ..."); collect(ser, 3)
-    print("\n>>> 现在把车**匀速**转 90° (建议 5~10s 转完), 转完保持不动 <<<")
-    rows = collect(ser, 20)
-    print("阶段2: 静置观察回落 (已含在 20s 采集内)")
+    collect(ser, 5)
+    print("\n>>> 现在把车**原地匀速**转 90° (8~10s 转完, 平稳别晃), 转完保持不动 <<<")
+    rows = collect(ser, 30)
     send("ITEL 0")
     ser.close()
 

@@ -199,6 +199,9 @@ tick,gx10,gy10,gz10,roll10,pitch10,yaw10,stable,driftz100
 | `driftz100` | Z 轴漂移补偿当前值 ×100 | 0.01 °/s |
 
 - 频率：IMU 更新节拍（`IRATE`，默认 100ms）**2 分频** = 默认 5Hz，≈45B/行 ≈ 23%@9600
+- **模式 2 = VOFA+ FireWater**：行 `gx,gy,gz,roll,pitch,yaw,driftz`（逗号分隔+`\r\n`），7 通道
+  均为真实物理量（°/s 与 °，两位小数）——VOFA+ 选 FireWater 协议免配置直出曲线；
+  通道 0-6 依次为：陀螺 xyz（原始含零偏）/ 欧拉角 xyz / Z 轴漂移补偿。与模式 1 **二选一**
 - 用途：IMU-1 yaw 失真专案 E 系列实验（`IDRIFT 0` / `IGAIN 0 0` / `IRATE 50` 二分定位），
   配套工具 `tools/imu_turn_test.py`（90° 转角协议化：跟随角/回落量/静置漂移三指标 + 陀螺侧积分交叉验证）
 
@@ -247,7 +250,7 @@ tick,gx10,gy10,gz10,roll10,pitch10,yaw10,stable,driftz100
 | `DUMP` | — | 重放机内记录 |
 | `ODOM 0/1` | — | 里程计上报开关（上行 ODOM/ATT 二进制帧，见 §3.8.1；`STOP` 自动关闭） |
 | `WD <ms>` | 0–60000 | 命令看门狗超时（0=关）：超时无任何下行字节 → 自动急停一次并回 `WD TIMEOUT STOP`；随后收到任意字节自动解除闩锁重新武装 |
-| `ITEL 0/1` | — | IMU 姿态遥测 CSV（格式见 §3.5(d)，默认 5Hz；`STOP` 自动关闭） |
+| `ITEL 0/1/2` | — | IMU 姿态遥测（1=CSV 见 §3.5(d)，2=VOFA+ FireWater 7 通道真实物理量；默认 5Hz；`STOP` 自动关闭） |
 | `IGAIN <kp100> <ki100>` | ≥0 | Mahony 增益 ×100 在线整定（默认 50 0；`IGAIN 0 0` = 纯陀螺积分） |
 | `IDRIFT 0/1` | — | 运行时漂移补偿开关（关 = 完全无补偿的原始陀螺积分，IMU-1 专案 E1 实验） |
 | `IRATE <ms>` | 20–1000 | IMU 更新周期（默认 100=10Hz；50 时注意 ITEL 带宽翻倍） |

@@ -31,7 +31,7 @@
  *   REC 0/1           机内记录开关; DUMP 重放
  *   ODOM 0/1          里程计上报开关 (增量位姿/欧拉角二进制帧, 上位机对接)
  *   WD <ms>           命令看门狗超时 (0=关; 超时无下行字节 → 自动急停)
- *   ITEL 0/1          IMU 姿态遥测 CSV (行: tick,gx,gy,gz,roll,pitch,yaw,stable,driftz)
+ *   ITEL 0/1/2        IMU 姿态遥测 (1=CSV: tick,gx..driftz / 2=VOFA+ FireWater 浮点通道)
  *   IGAIN <kp100> <ki100>  Mahony 增益 ×100 在线整定
  *   IDRIFT 0/1        运行时漂移补偿开关 (IMU-1 yaw 失真 E1 实验)
  *   IRATE <ms>        IMU 更新周期 20~1000ms (默认 100; E3 实验采样率对照)
@@ -79,7 +79,7 @@ typedef enum {
 
     /* ---- IMU 调试工具链 (2026-09-15, 照调参工具链模式: 可开关, 默认关) ----
      * 数值域校验在 main 分发层 (照 STEP 先例); 执行端 = imu_bridge 调试接口 */
-    TXTCMD_ITEL,        /* i0=0/1 — IMU 姿态遥测 CSV (更新节拍 2 分频, 默认 5Hz) */
+    TXTCMD_ITEL,        /* i0=模式 0关/1=CSV(PC工具)/2=VOFA+ FireWater — IMU 姿态遥测 */
     TXTCMD_IGAIN,       /* i0=kp100, i1=ki100 — Mahony 增益 ×100 (在线整定, RAM 生效) */
     TXTCMD_IDRIFT,      /* i0=0/1 — 运行时漂移补偿开关 (E1 实验: 关=完全无补偿) */
     TXTCMD_IRATE,       /* i0=更新周期ms (20~1000) — IMU 更新节拍 (E3 实验: 10Hz 漏角对照) */

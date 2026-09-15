@@ -149,6 +149,7 @@ int main(void)
 
     /* ---- IMU 调试工具链 (2026-09-15): ITEL/IGAIN/IDRIFT/IRATE/ICAL ---- */
     check(txt_cmd_parse("ITEL 1", &tc) && tc.type == TXTCMD_ITEL && tc.i0 == 1, "ITEL 1");
+    check(txt_cmd_parse("ITEL 2", &tc) && tc.type == TXTCMD_ITEL && tc.i0 == 2, "ITEL 2 (VOFA+ FireWater)");
     check(txt_cmd_parse("ITEL 0", &tc) && tc.type == TXTCMD_ITEL && tc.i0 == 0, "ITEL 0");
     check(!txt_cmd_parse("ITEL", &tc),                        "ITEL 无参数 -> 拒绝");
     check(!txt_cmd_parse("ITELA 1", &tc),                     "ITELA 仍拒绝");

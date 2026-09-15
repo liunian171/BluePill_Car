@@ -143,9 +143,12 @@ static uint8_t      g_tel_div       = 0;       /* 50ms→100ms 分频 */
 /* ==== IMU 调试工具链 (2026-09-15, 照调参工具链模式: 可开关, 默认关; ITEL 随 STOP 关) ====
  * 背景: IMU-1 yaw 失真专案 (转 90° 只跟 ~20° 且回落) — 首嫌疑 = 漂移补偿把旋转误当零偏
  * (PC 仿真证实机理, tools/imu_sim_verify.py + doc/IMU调试工具链规划.md §3)。
- * ITEL 行: tick,gx10,gy10,gz10(°/s×10),roll10,pitch10,yaw10(°×10),stable,driftz100
- * 带宽: ~45B/行 @5Hz ≈ 225B/s (23%@9600) — 弱链路可用; IRATE 50 时 10Hz 需注意 */
-static uint8_t      g_itel_on       = 0;       /* IMU 姿态遥测开关 */
+ * ITEL 行 (模式1 CSV): tick,gx10,gy10,gz10(°/s×10),roll10,pitch10,yaw10(°×10),stable,driftz100
+ * ITEL 行 (模式2 VOFA+ FireWater): gx,gy,gz(°/s),roll,pitch,yaw(°),driftz(°/s) 两位小数,
+ *   7 通道真实物理量 — VOFA+ 选 FireWater 协议直接出曲线, 免换算 (逗号分隔+换行即其格式)
+ * 带宽: 两模式 ~40-45B/行 @5Hz ≈ 225B/s (23%@9600) — 弱链路可用; IRATE 50 时 10Hz 需注意;
+ *   模式 1/2 二选一 (同时开会双份流量) */
+static uint8_t      g_itel_mode     = 0;       /* 0关/1=CSV(PC工具)/2=VOFA+ FireWater */
 static uint8_t      g_itel_div      = 0;       /* 更新节拍 2 分频 (默认 5Hz) */
 static uint16_t     g_imu_period_ms = 100;     /* IMU 更新周期 (IRATE 20~1000, 默认=原 100ms 块) */
 static uint32_t     t_imu           = 0;       /* IMU 更新节拍基准 */
@@ -256,6 +259,17 @@ static int dec1(float v)
     if (v < 0) v = -v;
     int d = (int)((v - (float)(int)v) * 10.0f + 0.5f);
     return (d > 9) ? 9 : d;
+}
+
+/* 两位小数浮点 → "-1.63" 形式 (禁 %f 的整数拆分; 返回写入字符数) — VOFA+ FireWater 用 */
+static int fmt_f2(char *out, int n, float v)
+{
+    int neg = (v < 0);
+    float a = neg ? -v : v;
+    int ip = (int)a;
+    int fp = (int)((a - (float)ip) * 100.0f + 0.5f);
+    if (fp >= 100) { ip += 1; fp -= 100; }
+    return snprintf(out, n, "%s%d.%02d", neg ? "-" : "", ip, fp);
 }
 
 /* ---- 转向执行组件 (steering) 配置 + 输出绑定 ----
@@ -443,7 +457,7 @@ int main(void)
                         /* 调参工具链随急停关闭 (阶跃测试中途=安全终止, 遥测/记录回默认关) */
                         g_step_active = 0; g_tel_on = 0; g_rec_on = 0;
                         g_odom_on = 0;    /* 上位机对接上报同样关闭 (看门狗保持武装) */
-                        g_itel_on = 0;    /* IMU 遥测同属调试通道, 一并关闭 */
+                        g_itel_mode = 0;  /* IMU 遥测同属调试通道, 一并关闭 */
                         cmd_note("STOP ALL");
                         ack("STOP OK LINE OFF\r\n");
                         break;
@@ -652,10 +666,11 @@ int main(void)
 
                     /* ---- IMU 工具链 (解析域校验在 txt_cmd, 数值域在此; 执行端 = imu_bridge) ---- */
                     case TXTCMD_ITEL:
-                        g_itel_on = tc.i0 ? 1 : 0;
+                        if (tc.i0 < 0 || tc.i0 > 2) { ack("ITEL BAD\r\n"); cmd_note("ITEL BAD"); break; }
+                        g_itel_mode = (uint8_t)tc.i0;
                         g_itel_div = 0;   /* 开/关都对齐分频相位 */
-                        cmd_note("ITEL %d", g_itel_on);
-                        ack("ITEL:%d\r\n", g_itel_on);
+                        cmd_note("ITEL %d", g_itel_mode);
+                        ack("ITEL:%d\r\n", g_itel_mode);
                         break;
                     case TXTCMD_IGAIN:
                         /* Mahony 增益 ×100 (RAM 生效, 断电失); 允许 0 0 = 纯陀螺积分 (E2 实验) */
@@ -822,22 +837,34 @@ int main(void)
         if (now - t_imu >= g_imu_period_ms) {
             t_imu = now;
             (void)imu_bridge_update_filter(0, now);
-            if (g_itel_on && (++g_itel_div & 1) == 0) {
+            if (g_itel_mode > 0 && (++g_itel_div & 1) == 0) {
                 int16_t gx, gy, gz;
                 float drx, dry, drz, gs = imu_bridge_gyro_scale(0);   /* LSB/(°/s) */
                 float r = imu_bridge_get_roll(0), p = imu_bridge_get_pitch(0), y = imu_bridge_get_yaw(0);
                 float d10 = 10.0f, d100 = 100.0f;
                 if (imu_bridge_read_gyro_raw(0, &gx, &gy, &gz) != BRIDGE_OK) { gx = gy = gz = 0; }
                 (void)imu_bridge_get_drift(0, &drx, &dry, &drz);
-                char tb[52];
-                int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
+                float gxf = gx / gs, gyf = gy / gs, gzf = gz / gs;    /* raw → °/s */
+                char tb[56];
+                int tn;
+                if (g_itel_mode == 2) {
+                    /* VOFA+ FireWater: 7 通道真实物理量 (逗号分隔+换行即其协议格式) */
+                    char c1[10], c2[10], c3[10], c4[10], c5[10], c6[10], c7[10];
+                    fmt_f2(c1, 10, gxf); fmt_f2(c2, 10, gyf); fmt_f2(c3, 10, gzf);
+                    fmt_f2(c4, 10, r);   fmt_f2(c5, 10, p);   fmt_f2(c6, 10, y);
+                    fmt_f2(c7, 10, drz);
+                    tn = snprintf(tb, sizeof(tb), "%s,%s,%s,%s,%s,%s,%s\r\n",
+                                  c1, c2, c3, c4, c5, c6, c7);
+                } else {
+                    tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
                                   (unsigned long)now,
-                                  (int)(gx * d10 / gs), (int)(gy * d10 / gs), (int)(gz * d10 / gs),
+                                  (int)(gxf * d10), (int)(gyf * d10), (int)(gzf * d10),
                                   (int)((r < 0) ? (r * d10 - 0.5f) : (r * d10 + 0.5f)),
                                   (int)((p < 0) ? (p * d10 - 0.5f) : (p * d10 + 0.5f)),
                                   (int)((y < 0) ? (y * d10 - 0.5f) : (y * d10 + 0.5f)),
                                   (int)imu_bridge_stable(0),
                                   (int)((drz < 0) ? (drz * d100 - 0.5f) : (drz * d100 + 0.5f)));
+                }
                 if (tn > 0) tx_raw(tb, tn);
             }
         }
