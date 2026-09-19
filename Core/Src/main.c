@@ -16,6 +16,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "car_config.h"          /* 组装层配置单: 功能/链路编译开关 (铁律: 仅组装层+CMake 可 include) */
 #include "usbd_cdc_if.h"
 #include "driver/link_arbiter.h"
 #include "driver/pwm.h"
@@ -53,6 +54,29 @@
 #define LINK_USB          1
 #define LINK_COUNT        2
 #define LINK_BYTE_BUDGET  64    /* 每链路每轮主循环最多消费字节数 (时间片封顶) */
+
+/* ---- [P3 开关收口] 链路编译开关落到组装层接线 ----
+ * 真值源 = car_config.h（本文件是唯一被允许 include 它的 C 文件；组件层/桥接层禁 include）。
+ * 语义 = "这条链路的接线不存在"，而不是"上层记得别调"：
+ *   CAR_FEATURE_USB=0  → 消费循环整条跳过 / 发送 no-op / 判活恒假 / 仲裁固定 UART
+ *   CAR_FEATURE_UART=0 → 不开中断接收 / 发送 no-op / 仲裁固定 USB
+ *                        （平台 ops 同时由 CMake 换成 uart_platform_ops_stub.c）
+ * 双 0 无意义（车失联）→ CMakeLists configure 期已 FATAL_ERROR 拒绝。 */
+#define LINK_UART_ENABLED  CAR_FEATURE_UART
+#define LINK_USB_ENABLED   CAR_FEATURE_USB
+
+#if (LINK_UART_ENABLED == 0) && (LINK_USB_ENABLED == 0)
+#error "car_config.h: CAR_FEATURE_UART/USB 不能同时为 0 (车将没有可用控制链路)"
+#endif
+
+/* 双链路连通时仲裁自主切换；单链路时仲裁"固定"在存活链路（不喂伪判活、不发 failover） */
+#define LINK_BOTH_ENABLED  (LINK_UART_ENABLED && LINK_USB_ENABLED)
+/* 唯一存活链路（单链路模式下仲裁初始判活的固定值 + 禁用链路的发送回退目标） */
+#if LINK_USB_ENABLED
+#define LINK_FALLBACK      LINK_USB
+#else
+#define LINK_FALLBACK      LINK_UART
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -73,8 +97,12 @@ extern USBD_HandleTypeDef hUsbDeviceFS;   /* USB 判活/发送保护用 (usb_dev
 RingBuffer g_ringbuf_uart;
 RingBuffer g_ringbuf_usb;
 static RingBuffer *const g_link_rb[LINK_COUNT] = { &g_ringbuf_uart, &g_ringbuf_usb };
-/* 应答路由状态: 最近一条命令的来源链路 (应答/遥测按来源回; owner 判定归 link_arbiter) */
-static uint8_t g_active_link = LINK_USB;
+/* [P3 开关收口] 链路启用表 (与 g_link_rb 同序): 0 = 该链路编译期下线,
+ * 消费循环整条跳过 —— 禁用链路的 ringbuf 即便被写也无人读, 不留"半通"状态 */
+static const uint8_t g_link_on[LINK_COUNT] = { LINK_UART_ENABLED, LINK_USB_ENABLED };
+/* 应答路由状态: 最近一条命令的来源链路 (应答/遥测按来源回; owner 判定归 link_arbiter)
+ * [P3] 初值取存活链路 (USB 下线时不该默认把应答往不存在的链路送) */
+static uint8_t g_active_link = LINK_FALLBACK;
 /* 链路活动时刻 (OLED 页7 显示): UART 侧 MCU 无法感知 SPP 是否连接,
  * 用"距最近收字节的秒数"作活动指标; USB 用 dev_state+pClassData 判枚举配置态 */
 static uint32_t g_last_uart_rx_tick = 0;
@@ -258,11 +286,13 @@ static int spd_to_int(float v)
     return (int)((v >= 0.0f) ? (v + 0.5f) : (v - 0.5f));
 }
 
-/* 中断回调 */
+/* 中断回调 (UART 链路禁用时不接中断, 本回调不会被触发; 门控只为消除"半通"歧义) */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *hal_huart)
 {
     if (hal_huart->Instance != USART2) return;
+#if LINK_UART_ENABLED
     ringbuf_write(&g_ringbuf_uart, uart_debug.rx_byte);
+#endif
     HAL_UART_Receive_IT(hal_huart, &uart_debug.rx_byte, 1);
 }
 
@@ -270,19 +300,35 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *hal_huart)
  * ⚠️ pClassData 空指针保护: 未枚举/未配置时 CDC_Transmit_FS 会解引用 NULL → 硬错误 */
 static void usb_send_raw(const char *buf, int n)
 {
+#if LINK_USB_ENABLED
     if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED || hUsbDeviceFS.pClassData == NULL)
         return;
     uint32_t t0 = HAL_GetTick();
     while (CDC_Transmit_FS((uint8_t *)buf, (uint16_t)n) == USBD_BUSY) {
         if ((HAL_GetTick() - t0) > 10) return;
     }
+#else
+    (void)buf; (void)n;   /* [P3] USB 链路编译期下线: 发送 no-op */
+#endif
+}
+
+/* [P1 双链路] UART 原始发送 (阻塞; 组装层唯一的 UART 发送出口)
+ * [P3 开关收口] 链路禁用时整体 no-op —— 与 usb_send_raw 对称, 两个原始出口
+ * 是"链路是否真的存在"的唯一判据点, 上层路由只管选谁, 不判在不在 */
+static void uart_send_raw(const char *buf, int n)
+{
+#if LINK_UART_ENABLED
+    HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)n, 100);
+#else
+    (void)buf; (void)n;   /* [P3] UART 链路编译期下线: 发送 no-op */
+#endif
 }
 
 /* [P1 双链路] 链路路由发送: 应答/遥测走最近命令的来源链路 (应答路由) */
 static void link_tx(const char *buf, int n)
 {
     if (g_active_link == LINK_USB) usb_send_raw(buf, n);
-    else                           HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)n, 100);
+    else                           uart_send_raw(buf, n);
 }
 
 /* [P2 双链路仲裁] 按 owner 链路发送 (仲裁广播 USB LOST / USB READY 专用 —
@@ -290,7 +336,7 @@ static void link_tx(const char *buf, int n)
 static void link_owner_tx(const char *buf, int n)
 {
     if (link_arb_owner() == LINK_ARB_USB) usb_send_raw(buf, n);
-    else                                  HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)n, 100);
+    else                                  uart_send_raw(buf, n);
 }
 
 /* [P2 双链路仲裁] 调参会话激活判据 (会话锁注入, 设计文档 §2.3) */
@@ -306,10 +352,18 @@ static void arb_broadcast(const char *msg)
 }
 
 /* [P2 双链路仲裁] ⚠️ 编号换算: main 消费循环 0=UART/1=USB, 仲裁枚举 0=USB/1=UART
- * — 两套编号相反, 直接比较必错 (2026-09-19 真机抓出: 门控形同虚设) */
+ * — 两套编号相反, 直接比较必错 (2026-09-19 真机抓出: 门控形同虚设)
+ * [P3 开关收口] 单链路模式下直接返回唯一存活链路: 仲裁状态机仍会跑, 但"谁能指挥"
+ * 的答案不该依赖它 —— 禁用链路的 BUSY 门控/看门狗喂狗都走这里 */
 static uint8_t owner_main_link(void)
 {
+#if !LINK_USB_ENABLED
+    return LINK_UART;      /* 只剩 UART 链路 */
+#elif !LINK_UART_ENABLED
+    return LINK_USB;       /* 只剩 USB 链路 */
+#else
     return (link_arb_owner() == LINK_ARB_USB) ? LINK_USB : LINK_UART;
+#endif
 }
 
 /* 裸发送: 不记录 OLED 应答页 (寻迹诊断等高频事件用) */
@@ -465,21 +519,37 @@ int main(void)
     for (;;) { HAL_Delay(1); }
 #endif
     /* ---- UART (BT04 蓝牙串口) ----
-     * PA2/PA3 现接 BT04, 透明传输波特率 9600, 覆盖 CubeMX 默认 115200 */
+     * PA2/PA3 现接 BT04, 透明传输波特率 9600, 覆盖 CubeMX 默认 115200
+     * [P3 开关收口] CAR_FEATURE_UART=0 → 不重配 9600、不开中断接收、不发横幅;
+     *   平台 ops 亦由 CMake 换成 no-op 空壳 → 该链路的硬件通道整体不存在 */
+#if LINK_UART_ENABLED
     huart2.Init.BaudRate = 9600;
     if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
+#endif
     ringbuf_init(&g_ringbuf_uart);
     ringbuf_init(&g_ringbuf_usb);   /* [P1 双链路] */
 
-    /* ---- [P2 双链路仲裁] 上电 usb_alive = 未知(-1): 枚举异步完成, 由宽限期逻辑兜底 ---- */
+    /* ---- [P2 双链路仲裁] 上电 usb_alive 初值 ----
+     * 双链路: 未知(-1), 枚举异步完成, 由宽限期逻辑兜底 (超时不活 → 自动切 UART)
+     * [P3] USB=0 → 直接判死(0) = 仲裁固定走 UART; UART=0 → 直接判活(1) = 固定走 USB。
+     *      单链路模式下主循环不再喂判活 (LINK_BOTH_ENABLED 门控), 状态机保持初值。 */
     {
         LinkArbCfg ac = { .session_active = arb_session_active,
                           .broadcast      = arb_broadcast,
                           .boot_grace_ms  = 3000 };
-        link_arb_init(&ac, -1, HAL_GetTick());
+#if !LINK_USB_ENABLED
+        const int8_t alive_init = 0;    /* 无 USB 链路 → 固定 UART */
+#elif !LINK_UART_ENABLED
+        const int8_t alive_init = 1;    /* 无 UART 链路 → 固定 USB */
+#else
+        const int8_t alive_init = -1;   /* 未知, 待主循环喂判别活 */
+#endif
+        link_arb_init(&ac, alive_init, HAL_GetTick());
     }
+#if LINK_UART_ENABLED
     HAL_UART_Receive_IT(&huart2, &uart_debug.rx_byte, 1);
     HAL_UART_Transmit(&huart2, (uint8_t *)"UART2 Ready\r\n", 13, 100);
+#endif
 
     /* ---- 编码器 ---- */
     henc1.htim  = &htim2;  henc1.ops = encoder_platform_get_ops();
@@ -566,6 +636,7 @@ int main(void)
          * (时间片封顶, 见 doc/双链路仲裁设计文档.md §3.2); 执行完一条命令
          * 再回来读下一条, 双链路按行/帧粒度交错, 谁也不饿死谁 */
         for (uint8_t li = 0; li < LINK_COUNT; li++) {
+          if (!g_link_on[li]) continue;   /* [P3 开关收口] 该链路编译期下线: 不消费 */
           uint8_t budget = LINK_BYTE_BUDGET;
           while (budget-- && ringbuf_read(g_link_rb[li], &b) == 0) {
             g_active_link = li;   /* 应答路由: 谁的命令回谁 (P2 由 link_arbiter 取代) */
@@ -877,6 +948,7 @@ int main(void)
                             cmd_note("OWNER:%s", link_arb_owner() == LINK_ARB_USB ? "USB" : "UART");
                             ack("OWNER:%s\r\n", (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART");
                         } else {
+#if LINK_BOTH_ENABLED
                             LinkArbRet r = link_arb_request(tc.i0 == 1 ? LINK_ARB_UART : LINK_ARB_USB);
                             if (r == LINK_ARB_OK) {
                                 cmd_note("LINK:%s", tc.i0 == 1 ? "UART" : "USB");
@@ -885,6 +957,16 @@ int main(void)
                                 cmd_note("BUSY SESSION");
                                 ack("BUSY:SESSION\r\n");
                             }
+#else
+                            /* [P3 开关收口] 单链路模式: 目标链路编译期不存在 → 明确回 LINK:OFF
+                             * (既不当成功也不无声无操作, 上位机必须能分辨"切不了") */
+                            if (((tc.i0 == 1) ? LINK_UART : LINK_USB) == LINK_FALLBACK) {
+                                ack("LINK:%s OK\r\n", tc.i0 == 1 ? "UART" : "USB");
+                            } else {
+                                cmd_note("LINK:OFF");
+                                ack("LINK:OFF\r\n");
+                            }
+#endif
                         }
                         break;
                     default:
@@ -912,11 +994,15 @@ int main(void)
 
             /* ═══ [P2 双链路仲裁] USB 判活喂入 (每控制节拍一次; 内部做边沿检测:
              *  失联 → 自动 failover + 广播; 恢复 → 仅广播 USB READY 不抢回) ═══ */
+#if LINK_BOTH_ENABLED
             {
                 uint8_t alive = (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
                                  hUsbDeviceFS.pClassData != NULL && g_usb_dtr) ? 1u : 0u;
                 (void)link_arb_notify((int8_t)alive, now);
             }
+#endif
+            /* [P3 开关收口] 单链路模式: 不喂伪判活 (喂了只会让仲裁状态机在
+             * "确定不存在的那条链路"上做无意义边沿), 仲裁保持 init 时的固定 owner */
 
             /* ═══ 命令看门狗: 超时无任何下行字节 → 急停一次 (闩锁防刷屏) ═══
              * 断链恢复 = 收到任意字节自动解除闩锁 (主循环喂狗处), 无需重新配置 */
@@ -1142,9 +1228,14 @@ int main(void)
                       *       / 末列 = UART 静默秒数 或 FZ=OLED 已熔断停刷 */
             {
                 /* USB: 枚举+配置完成即 ON (DTR 级判活 P2 落地后细化为"应用已打开")
-                 * UART: MCU 无法感知 SPP 连接态, 显示距最近收字节的秒数 (从未收过显 "-") */
+                 * UART: MCU 无法感知 SPP 连接态, 显示距最近收字节的秒数 (从未收过显 "-")
+                 * [P3] USB 链路编译期下线时不宣称在线 (恒 OFF), 免得与实测矛盾 */
+#if LINK_USB_ENABLED
                 uint8_t usb_on = (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
                                   hUsbDeviceFS.pClassData != NULL);
+#else
+                uint8_t usb_on = 0;
+#endif
                 char us[10];
                 if (g_uart_seen)
                     snprintf(us, sizeof(us), "%lus",
@@ -1153,8 +1244,12 @@ int main(void)
                     snprintf(us, sizeof(us), "-");
 
                 uint16_t oled_e = oled_bridge_tx_fail_count();
-                uint16_t rb_ovf = (uint16_t)ringbuf_overflow(&g_ringbuf_uart) +
-                                  (uint16_t)ringbuf_overflow(&g_ringbuf_usb);
+                /* [P3] 禁用链路的 ringbuf 无人消费, 其溢出计数不代表"丢过有用数据"
+                 * → 不计入总数 (双链路全开时两者都算, 与 P2 行为一致) */
+                uint16_t rb_ovf = (uint16_t)ringbuf_overflow(&g_ringbuf_uart);
+#if LINK_USB_ENABLED
+                rb_ovf = (uint16_t)(rb_ovf + ringbuf_overflow(&g_ringbuf_usb));
+#endif
                 if (oled_e || rb_ovf)     /* 有异常才挤掉 USB 状态字段, 正常态保持原版式 */
                     snprintf(b,sizeof(b),"L:%s E%d O%d %s",
                              (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART",

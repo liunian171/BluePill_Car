@@ -19,7 +19,7 @@
 
 | 步骤 | 内容 | 工具 | 产出 |
 |------|------|------|------|
-| ① 连接 | 扫口+PONG 探测，端口存档 | bt_connect.py | tools/data/bt_port.txt |
+| ① 连接 | 扫口+PONG 探测，端口存档 | link_probe.py（`bt_connect.py` 为兼容壳） | tools/data/link_probe.txt（BT04 另写 bt_port.txt） |
 | ② 采集 | 开环阶跃，多工作点 × 5s | step_capture.py | step_m*_*.csv |
 | ③ 辨识 | FOPDT: K/τ/θ + 固件域换算 | step_ident.py | 参数建议表 |
 | ④ 验证 | A/B/C 闭环对照 + 量化指标 | ab_step.py | ab_*.csv + 指标表 |
