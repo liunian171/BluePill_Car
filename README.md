@@ -48,7 +48,7 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Release/BluePill_Car.elf 0x0800000
 PC 侧单元测试桩（无需硬件）：
 
 ```powershell
-.\test\run_pc_tests.ps1               # txt_cmd / steering / speed_loop / odom / attitude 五组桩
+.\test\run_pc_tests.ps1               # 八组桩: txt_cmd / steering / speed_loop / odom / attitude / link_arbiter / ringbuf
 ```
 
 ---
@@ -384,6 +384,7 @@ print(ser.readline())        # b'M0:60RPM\r\n'
 | `ack()` 为**阻塞发送** | 9600 下 6–11 ms/次；`DUMP` 逐行 20 ms 阻塞主循环 | 已限流使用；后续改中断/DMA + 发送队列 |
 | 遥测为行文本（非二进制） | 带宽利用率低 | 原 `firewater_send` 二进制帧已删除（2026-09-14）；VOFA+ 波形走 `ITEL 2`；更高带宽需先扩协议/提速串口 |
 | 蓝牙端口号随配对变化 | 脚本硬编码端口会失效 | 用 `bt_connect.py` 扫口并写 `tools/data/bt_port.txt` |
+| **单次突发下行 ≤ 239 B**（≈47 条文本命令；二进制帧仍应"一帧连续发"） | 超限**丢新字节**（已收数据不受影响） | 突发之间留一拍处理时间；溢出计数可查（OLED 页 7 `O<n>` 字段）。容量不可再扩：head/tail 为 `uint8_t`，上限 255（2026-09-19 实测 30/40 条零丢、60 条(300B) 超限） |
 | 角度应答仅一位小数 | 不能当高精度读数 | 精度需求高时用二进制帧/机上记录 |
 | `M0 60` 这类手动命令会退出巡线 | 按键后巡线停 | 设计如此（接管权语义）；恢复巡线发 `L 1` |
 
