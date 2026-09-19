@@ -57,6 +57,12 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Release/BluePill_Car.elf 0x0800000
 > 三个宏**只允许**作用于 CMake 源文件列表与组装层 `main.c` 接线；组件层/桥接层禁止 include。
 > 链路双 0 会被 CMake 直接拒绝。四组合验证脚本：`bash tools/car_cfg_matrix.sh`。
 
+**整车标定表**（同一文件的 `§整车标定` 段，2026-09-19 集中）：PPR / 编码器计数模值 / 轮周长 / 轮半径 / 轮距 /
+电机上限与 PWM 频率 / M1 方向镜像对 / 速度环 PID 与前馈 / IMU 安装方向 / 舵机行程与直行位 /
+三处节拍 / 巡线初值 —— 数值**只在这里出现一次**，组装层在配置结构体初始化处引用。
+改数值**不需要重新 configure**（与开关宏不同），但必须重新编译烧录 + 走真机回归
+（`python tools/link_regress.py`）。规则见 [`doc/代码风格与模块衔接指南.md`](doc/代码风格与模块衔接指南.md) §4.5。
+
 PC 侧单元测试桩（无需硬件）：
 
 ```powershell

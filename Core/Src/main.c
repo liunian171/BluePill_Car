@@ -127,16 +127,17 @@ static I2C_Handle imu_i2c = {
 /* ⚠️ drive_sign（驱动侧方向）与下方速度环标定表的 fb_sign（反馈侧符号）**必须镜像**。
  *    两者是同一个硬件事实的两面（MOTOR B 的驱动与编码器接线均反相）；
  *    只改一侧 = 正反馈飞车（2026-09-13 真机实证：两侧失配时 M1 上电持续加速）。
- *    故两者必须相邻声明，改动时成对修改。 */
+ *    故两者必须相邻声明，改动时成对修改 —— 数值真值源现已集中到 car_config.h
+ *    的 CAR_M1_DRIVE_SIGN / CAR_M1_FB_SIGN（2026-09-19 标定集中）。 */
 static const motor_bridge_cfg_t g_motor_cfg[2] = {
     { .protocol = MOTOR_PROTOCOL_TB6612,
       .pwm = &pwm_tim1_ch1, .ain1 = &motor_a_in1, .ain2 = &motor_a_in2, .stby = NULL,
-      .max_rpm = 319.0f, .wheel_radius_mm = 32.5f,
+      .max_rpm = CAR_MOTOR_MAX_RPM, .wheel_radius_mm = CAR_WHEEL_RADIUS_MM,
       .drive_sign =  1 },
     { .protocol = MOTOR_PROTOCOL_TB6612,
       .pwm = &pwm_tim1_ch2, .ain1 = &motor_b_in1, .ain2 = &motor_b_in2, .stby = NULL,
-      .max_rpm = 319.0f, .wheel_radius_mm = 32.5f,
-      .drive_sign = -1 },   /* ← 必须与 g_spd_cfg.ch[1].fb_sign 同号 */
+      .max_rpm = CAR_MOTOR_MAX_RPM, .wheel_radius_mm = CAR_WHEEL_RADIUS_MM,
+      .drive_sign = CAR_M1_DRIVE_SIGN },   /* ← 必须与 g_spd_cfg.ch[1].fb_sign 同源 */
 };
 
 static const servo_bridge_cfg_t g_servo_cfg = {
@@ -157,24 +158,24 @@ static const imu_bridge_cfg_t g_imu_cfg = {
 
 /* ==== 速度环执行组件 (speed_loop) 的标定表 —— 组装层只留"配置 + 接线" ====
  * PID / 前馈 / 测速 / 限幅 / 停车语义 / 状态保持 已全部归位到组件内部（C2, 2026-09-13）。
- * 下列数值为"车知识/硬件知识"，全部经本表注入；换车/换电机只改本表，不改组件。
- *   ppr        : 编码器每转脉冲数（init 时用 henc 实测值覆盖，此处为缺省回退）
+ * 数值真值源集中到 car_config.h「整车标定表」（2026-09-19 标定集中）：
+ *   ppr        : 编码器每转脉冲数（init 时用 henc 实测值覆盖，标定表值作缺省回退）
  *   enc_span   : 16 位定时器计数模值（回绕校正用）；换 32 位编码器置 0
- *   fb_sign    : 反馈符号，必须镜像驱动侧取反（E2 硬件接反 → id1 = -1）
+ *   fb_sign    : 反馈符号，必须镜像驱动侧取反（E2 硬件接反 → id1 = CAR_M1_FB_SIGN）
  *   ff_gain    : 前馈系数（FF 命令在线整定，辨识值 1/K ≈ 1.0）
- *   out ±319   : 输出限幅 = 电机 max_rpm 实测
+ *   out ±max   : 输出限幅 = 电机 max_rpm 实测（与电机桥同源，改一处即可）
  *   kp/ki/kd   : SIMC 阶跃辨识值（2026-09-13，见 tools/step_ident.py） */
 static speed_loop_cfg_t g_spd_cfg = {
     .ch_count = 2,
     .ch = {
         /* id0 (MOTOR A, E1 同向) */
-        { .ppr = 1466.0f, .enc_span = 65536, .fb_sign =  1,
-          .ff_gain = 1.0f, .out_min = -319.0f, .out_max = 319.0f,
-          .kp = 0.87f, .ki = 0.40f, .kd = 0.0f },
-        /* id1 (MOTOR B, E2 硬件接反 → 反馈同号取反) */
-        { .ppr = 1466.0f, .enc_span = 65536, .fb_sign = -1,
-          .ff_gain = 1.0f, .out_min = -319.0f, .out_max = 319.0f,
-          .kp = 0.87f, .ki = 0.40f, .kd = 0.0f },
+        { .ppr = (float)CAR_PPR, .enc_span = CAR_ENC_SPAN, .fb_sign =  1,
+          .ff_gain = CAR_SPD_FF_GAIN, .out_min = -CAR_MOTOR_MAX_RPM, .out_max = CAR_MOTOR_MAX_RPM,
+          .kp = CAR_SPD_KP, .ki = CAR_SPD_KI, .kd = CAR_SPD_KD },
+        /* id1 (MOTOR B, E2 硬件接反 → 反馈符号与驱动侧同源镜像) */
+        { .ppr = (float)CAR_PPR, .enc_span = CAR_ENC_SPAN, .fb_sign = CAR_M1_FB_SIGN,
+          .ff_gain = CAR_SPD_FF_GAIN, .out_min = -CAR_MOTOR_MAX_RPM, .out_max = CAR_MOTOR_MAX_RPM,
+          .kp = CAR_SPD_KP, .ki = CAR_SPD_KI, .kd = CAR_SPD_KD },
     }
 };
 
@@ -217,7 +218,7 @@ static uint8_t      g_tel_div       = 0;       /* 50ms→100ms 分频 */
  *   模式 1/2 二选一 (同时开会双份流量) */
 static uint8_t      g_itel_mode     = 0;       /* 0关/1=CSV(PC工具)/2=VOFA+ FireWater */
 static uint8_t      g_itel_div      = 0;       /* 更新节拍 2 分频 (默认 5Hz) */
-static uint16_t     g_imu_period_ms = 100;     /* IMU 更新周期 (IRATE 20~1000, 默认=原 100ms 块) */
+static uint16_t     g_imu_period_ms = CAR_IMU_PERIOD_MS;  /* IMU 更新周期 (IRATE 20~1000 可在线改) */
 static uint32_t     t_imu           = 0;       /* IMU 更新节拍基准 */
 
 /* ==== 上位机对接 (2026-09-14): 里程计上报 + 命令看门狗 ====
@@ -235,15 +236,16 @@ static uint32_t     g_wd_ms         = 0;       /* 0 = 关 (默认, 保持现有�
 static uint32_t     g_last_rx_tick  = 0;       /* 最近下行字节时刻 (主循环每字节刷新) */
 static uint8_t      g_wd_fired      = 0;       /* 触发闩锁: 防止超时期间反复急停刷屏 */
 
-/* ==== 里程计感知组件 (odom) 的标定表 + IO 绑定 — 车知识集中注入 ==== */
+/* ==== 里程计感知组件 (odom) 的标定表 + IO 绑定 — 车知识集中注入 ====
+ * 数值真值源 = car_config.h「整车标定表」（2026-09-19 标定集中） */
 static const odom_cfg_t g_odom_cfg = {
-    .ppr    = { 1466.0f, 1466.0f },          /* 编码器实测 (README §1) */
-    .wheel_circ_mm   = 205.0f,               /* 轮周长 (README 权威 20.5cm) */
-    .wheel_track_mm  = 0.0f,                 /* 轮距 ⚠️ 待标定 — 本车走 IMU yaw 差分, 不参与 */
-    .enc_span        = 65536.0f,
-    .sign            = { 1, -1 },            /* ⚠️ 必须镜像 g_spd_cfg.ch[].fb_sign (E2 接反) */
-    .yaw_sign        = -1,                   /* MPU6050 安装实测 yaw 顺时针为正 → 取反成"逆时针为正"
-                                              * (2026-09-14 真机: 顺时针转车头 yaw +16.5°, 见开发跟踪 R-1) */
+    .ppr    = { (float)CAR_PPR, (float)CAR_PPR },   /* 编码器实测 */
+    .wheel_circ_mm   = CAR_WHEEL_CIRC_MM,           /* 轮周长 (README 权威 20.5cm) */
+    .wheel_track_mm  = CAR_WHEEL_TRACK_MM,          /* 轮距 ⚠️ 未标定 — 本车走 IMU yaw 差分, 不参与 */
+    .enc_span        = (float)CAR_ENC_SPAN,
+    .sign            = { 1, CAR_M1_FB_SIGN },       /* ⚠️ 与 g_spd_cfg.ch[].fb_sign 同源 (E2 接反) */
+    .yaw_sign        = CAR_YAW_SIGN,                /* MPU6050 安装方向 (顺时针为正 → 取反)
+                                                     * (2026-09-14 真机: 顺时针转车头 yaw +16.5°, 见开发跟踪 R-1) */
 };
 static int32_t odom_io_read_enc(uint8_t id)
 {
@@ -422,19 +424,13 @@ static int fmt_f2(char *out, int n, float v)
  * 物理角 = 输出角 + SERVO_PHYS_OFFSET (135° 电气中位 = 前轮正前, 摆臂安装偏置)
  * ⚠️ 方向备忘: 指令正向(朝 -65) = 用户标"左"——摆臂偏装 ~90° 且方向与常规相反,
  *   SS3 转向模型统一符号; 直行位 ≠ 0 由实测决定, SV 0 会 clamp 到左满舵
- * 注: 标定值集中于此由组装层注入; 待 car_config 表建立后迁入(结构优化顺序分析 §8.2 序 7) */
-#define SERVO_PHYS_OFFSET   135.0f    /* 输出域 → 物理角 安装偏置(°) */
-#define SERVO_LIM_MIN     (-115.0f)   /* 输出域下限 = 右满舵(实测) */
-#define SERVO_LIM_MAX     ( -65.0f)   /* 输出域上限 = 左满舵(实测) */
-#define SERVO_CENTER      ( -90.0f)   /* 直行位(°) (实测) — 上电/STOP 目标 */
-#define SERVO_LIM_ABS       135.0f    /* 输出域绝对值上限(配置校验用) */
-
+ * 注: 标定值现已迁入 car_config.h「整车标定表」(2026-09-19 标定集中) */
 static const steering_cfg_t g_steering_cfg = {
-    .lim_min     = SERVO_LIM_MIN,
-    .lim_max     = SERVO_LIM_MAX,
-    .center      = SERVO_CENTER,
-    .phys_offset = SERVO_PHYS_OFFSET,
-    .lim_abs     = SERVO_LIM_ABS,
+    .lim_min     = CAR_SERVO_LIM_MIN,
+    .lim_max     = CAR_SERVO_LIM_MAX,
+    .center      = CAR_SERVO_CENTER,
+    .phys_offset = CAR_SERVO_PHYS_OFFSET,
+    .lim_abs     = CAR_SERVO_LIM_ABS,
     .servo_id    = 0,
 };
 
@@ -553,15 +549,15 @@ int main(void)
 
     /* ---- 编码器 ---- */
     henc1.htim  = &htim2;  henc1.ops = encoder_platform_get_ops();
-    henc1.ppr   = 1466;    henc1.position = 0;
+    henc1.ppr   = CAR_PPR; henc1.position = 0;
     encoder_start(&henc1);
     henc2.htim  = &htim3;  henc2.ops = encoder_platform_get_ops();
-    henc2.ppr   = 1466;    henc2.position = 0;
+    henc2.ppr   = CAR_PPR; henc2.position = 0;
     encoder_start(&henc2);
 
-    /* ---- PWM 20kHz 初始 0% ---- */
-    pwm_set_freq(&pwm_tim1_ch1, 20000); pwm_set_duty_0E3(&pwm_tim1_ch1, 0); pwm_start(&pwm_tim1_ch1);
-    pwm_set_freq(&pwm_tim1_ch2, 20000); pwm_set_duty_0E3(&pwm_tim1_ch2, 0); pwm_start(&pwm_tim1_ch2);
+    /* ---- PWM 电机 20kHz 初始 0% ---- */
+    pwm_set_freq(&pwm_tim1_ch1, CAR_MOTOR_PWM_HZ); pwm_set_duty_0E3(&pwm_tim1_ch1, 0); pwm_start(&pwm_tim1_ch1);
+    pwm_set_freq(&pwm_tim1_ch2, CAR_MOTOR_PWM_HZ); pwm_set_duty_0E3(&pwm_tim1_ch2, 0); pwm_start(&pwm_tim1_ch2);
 
     /* ---- 电机桥（C1：配置结构注入 + init 失败即停）---- */
     if (motor_bridge_init(0, &g_motor_cfg[0]) != BRIDGE_OK ||
@@ -577,7 +573,7 @@ int main(void)
         Error_Handler();
 
     /* ---- 舵机 50Hz ---- */
-    pwm_set_freq(&pwm_tim4_ch3, 50); pwm_start(&pwm_tim4_ch3);
+    pwm_set_freq(&pwm_tim4_ch3, CAR_SERVO_PWM_HZ); pwm_start(&pwm_tim4_ch3);
 
     /* ---- 舵机桥 (PB8) + 转向执行组件: 上电回直行位 = 安全铁律 ---- */
     if (servo_bridge_init(0, &g_servo_cfg) != BRIDGE_OK)
@@ -594,7 +590,7 @@ int main(void)
     oled_bridge_show_string_small(2,0,"Boot...");
 
     /* ---- 寻迹 ---- */
-    line_follower_init(30.0f, 10.0f);
+    line_follower_init(CAR_LF_BASE_SPD, CAR_LF_KP);
     line_follower_set_event_cb(line_diag);
 
     /* ---- IMU ---- */
@@ -987,9 +983,9 @@ int main(void)
         for (uint8_t li = 0; li < LINK_COUNT; li++)
             if (in_frame[li] && (HAL_GetTick() - t_frame[li]) > 100) { in_frame[li] = 0; f_len[li] = 0; }
 
-        /* ② PID 独立运行 — 每 50ms，不受 OLED 拖累 */
+        /* ② PID 独立运行 — 每 CAR_CTRL_PERIOD_MS，不受 OLED 拖累 */
         uint32_t now = HAL_GetTick();
-        if (now - t_pid >= 50) {
+        if (now - t_pid >= CAR_CTRL_PERIOD_MS) {
             t_pid = now;
 
             /* ═══ [P2 双链路仲裁] USB 判活喂入 (每控制节拍一次; 内部做边沿检测:
@@ -1159,7 +1155,7 @@ int main(void)
          * [OLED 分页轮转] 每 100ms 只刷 1 页 (8 页 800ms 轮完) — I2C2 异常时每页
          * ~10ms 超时, 8 页连刷曾阻塞主循环 ~850ms/圈 → 控制环掉到 1Hz (2026-09-13
          * 调参实验实测踩坑, 见调试总结 §14 优化方向); 分页后最坏阻塞 ≤1 页 */
-        if (now - t_disp >= 100) {
+        if (now - t_disp >= CAR_DISP_PERIOD_MS) {
             t_disp = HAL_GetTick();
 
             /* 读传感器 (IMU 已在 ③b 独立节拍更新, 此处只取缓存值刷新显示) */
