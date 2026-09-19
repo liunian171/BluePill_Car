@@ -86,6 +86,14 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
 )
 
+# ---- USB 独立链路测试模式 (临时, 链路验证通过后移除) ----
+# 用法: cmake --preset Release -DUSB_ECHO_TEST=1 (改宏后必须重新 configure)
+# 效果: main.c 只 init USB + 空转, 车功能全不 init; CDC 收到 PING 回 PONG, 其余原样回显
+if(USB_ECHO_TEST)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE USB_ECHO_TEST)
+    message(STATUS "USB_ECHO_TEST: ON (main.c 仅跑 USB 回显测试, 车功能不 init)")
+endif()
+
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 

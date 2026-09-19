@@ -177,6 +177,18 @@ int txt_cmd_parse(const char *s, TxtCmd *o)
         return 1;
     }
 
+    /* ---- LINK ?/USB/UART (双链路仲裁: 指挥权查询/切换, doc/双链路仲裁设计文档.md §2.2) ---- */
+    if (strncmp(p, "LINK", 4) == 0) {
+        const char *q = p + 4;
+        o->type = TXTCMD_LINK;
+        o->i0 = -1;                     /* 默认 = 查询 (LINK 或 LINK ?) */
+        if (strncmp(q, " USB", 4) == 0)  { o->i0 = 0; return 1; }
+        if (strncmp(q, " UART", 5) == 0) { o->i0 = 1; return 1; }
+        if (q[0] == ' ' && q[1] == '?')  { o->i0 = -1; return 1; }
+        if (q[0] == '\0')                { o->i0 = -1; return 1; }   /* 裸 LINK = 查询 */
+        return 0;                        /* LINK <未知目标> → 不识别回 ? */
+    }
+
     /* ---- ITEL 0/1 (IMU 工具链: 姿态遥测 CSV 开关) ---- */
     if (strncmp(p, "ITEL", 4) == 0) {
         const char *q = p + 4;

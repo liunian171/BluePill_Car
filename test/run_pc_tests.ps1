@@ -53,5 +53,13 @@ if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
 if ($LASTEXITCODE -ne 0) { $failed++ }
 
 Write-Host ""
+Write-Host "== 编译+运行: link_arbiter 双链路仲裁测试桩 (P2) =="
+& $gcc -Wall -Wextra @incs -o build/pc_test_link_arbiter.exe `
+    test/host_link_arbiter_test.c Core/Src/driver/link_arbiter.c
+if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
+& build\pc_test_link_arbiter.exe
+if ($LASTEXITCODE -ne 0) { $failed++ }
+
+Write-Host ""
 if ($failed -eq 0) { Write-Host "== 全部测试桩通过 ==" } else { Write-Host "== 有 $failed 组测试失败 ==" }
 exit $failed

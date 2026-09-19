@@ -84,6 +84,10 @@ typedef enum {
     TXTCMD_IDRIFT,      /* i0=0/1 — 运行时漂移补偿开关 (E1 实验: 关=完全无补偿) */
     TXTCMD_IRATE,       /* i0=更新周期ms (20~1000) — IMU 更新节拍 (E3 实验: 10Hz 漏角对照) */
     TXTCMD_ICAL,        /* 无参数 — 重新触发零偏校准 (需静止, 完成后 yaw 归零) */
+
+    /* ---- 双链路仲裁 (2026-09-19, 权威见 doc/双链路仲裁设计文档.md §2) ----
+     * STOP 安全例外不在此: STOP 仍为独立类型, 分发层直通 */
+    TXTCMD_LINK,        /* i0: -1=查询 0=USB 1=UART — 指挥权切换 (接管/让出/抢回三语义合一) */
 } TxtCmdType;
 
 typedef struct {

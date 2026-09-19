@@ -5,13 +5,19 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "usart.h"
-#include "gpio.h"
-#include "tim.h"
+#include "dma.h"
 #include "i2c.h"
+#include "tim.h"
+#include "usart.h"
+#include "usb_device.h"
+#include "gpio.h"
 
+/* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "usbd_cdc_if.h"
+#include "driver/link_arbiter.h"
 #include "driver/pwm.h"
 #include "driver/uart.h"
 #include "driver/uart_platform_ops.h"
@@ -35,12 +41,46 @@
 #include <stdio.h>
 /* USER CODE END Includes */
 
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+/* [P1 双链路] 链路编号与消费预算 (link_arbiter P2 落地前的过渡定义) */
+#define LINK_UART         0
+#define LINK_USB          1
+#define LINK_COUNT        2
+#define LINK_BYTE_BUDGET  64    /* 每链路每轮主循环最多消费字节数 (时间片封顶) */
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+
 /* USER CODE BEGIN PV */
 UART_Handle    uart_debug = {
     .huart      = &huart2,
     .ops        = &uart_platform_ops_stm32,
 };
-static RingBuffer g_ringbuf_debug;
+extern USBD_HandleTypeDef hUsbDeviceFS;   /* USB 判活/发送保护用 (usb_device.c 定义) */
+/* [P1 双链路] 命令链路缓冲: UART(BT04) 与 USB CDC 各一 — 单生产者设计,
+ * 两个 ISR 必须各写各的 buf, 共写会竞态 (doc/双链路仲裁设计文档.md §3.1) */
+RingBuffer g_ringbuf_uart;
+RingBuffer g_ringbuf_usb;
+static RingBuffer *const g_link_rb[LINK_COUNT] = { &g_ringbuf_uart, &g_ringbuf_usb };
+/* 应答路由状态: 最近一条命令的来源链路 (应答/遥测按来源回; owner 判定归 link_arbiter) */
+static uint8_t g_active_link = LINK_USB;
+/* 链路活动时刻 (OLED 页7 显示): UART 侧 MCU 无法感知 SPP 是否连接,
+ * 用"距最近收字节的秒数"作活动指标; USB 用 dev_state+pClassData 判枚举配置态 */
+static uint32_t g_last_uart_rx_tick = 0;
+static uint8_t  g_uart_seen = 0;
+/* [P2 双链路仲裁] USB 判活信号 (usbd_cdc_if.c DTR 捕获) */
+extern volatile uint8_t g_usb_dtr;
 
 UserGPIO_Handle motor_a_in1 = { GPIOB, GPIO_PIN_13, &usergpio_platform_ops_stm32 };
 UserGPIO_Handle motor_a_in2 = { GPIOB, GPIO_PIN_12, &usergpio_platform_ops_stm32 };
@@ -117,7 +157,6 @@ static float        g_lf_tgt[2]     = {0.0f, 0.0f};
 static int8_t       g_lf_dir[2]     = {0, 0};
 
 static char         s_last_cmd[20]  = "NONE";  /* 最近执行的命令 (OLED 页6 显示) */static char         s_last_resp[20] = "-";     /* 最近应答/回复 (OLED 页4 显示) */
-static uint32_t     t_frame         = 0;       /* 二进制帧最近字节时间戳 (超时重同步) */
 
 /* ==== 调参工具链 (工程支持层, 可开关, 默认关 — STOP 急停自动关闭) ==== */
 static uint8_t      g_step_active   = 0;       /* 开环阶跃测试进行中 (激活时独占 50ms 控制帧) */
@@ -192,8 +231,13 @@ static const odom_io_t g_odom_io = {
 };
 /* USER CODE END PV */
 
+/* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+/* USER CODE BEGIN PFP */
 
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 /* ==== 速度环组件的 IO 绑定（组装层职责：把组件接口接到器件/传感器）====
  * 组件只持函数指针（不 include 桥接层头），故执行栈向上不反向依赖。
@@ -218,14 +262,60 @@ static int spd_to_int(float v)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *hal_huart)
 {
     if (hal_huart->Instance != USART2) return;
-    ringbuf_write(&g_ringbuf_debug, uart_debug.rx_byte);
+    ringbuf_write(&g_ringbuf_uart, uart_debug.rx_byte);
     HAL_UART_Receive_IT(hal_huart, &uart_debug.rx_byte, 1);
+}
+
+/* [P1 双链路] USB CDC 原始发送 (非阻塞; BUSY 限时 10ms 兜底不无限等)
+ * ⚠️ pClassData 空指针保护: 未枚举/未配置时 CDC_Transmit_FS 会解引用 NULL → 硬错误 */
+static void usb_send_raw(const char *buf, int n)
+{
+    if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED || hUsbDeviceFS.pClassData == NULL)
+        return;
+    uint32_t t0 = HAL_GetTick();
+    while (CDC_Transmit_FS((uint8_t *)buf, (uint16_t)n) == USBD_BUSY) {
+        if ((HAL_GetTick() - t0) > 10) return;
+    }
+}
+
+/* [P1 双链路] 链路路由发送: 应答/遥测走最近命令的来源链路 (应答路由) */
+static void link_tx(const char *buf, int n)
+{
+    if (g_active_link == LINK_USB) usb_send_raw(buf, n);
+    else                           HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)n, 100);
+}
+
+/* [P2 双链路仲裁] 按 owner 链路发送 (仲裁广播 USB LOST / USB READY 专用 —
+ * 与应答路由不同: 广播必须到达指挥权方, 而不是最后发命令的一方) */
+static void link_owner_tx(const char *buf, int n)
+{
+    if (link_arb_owner() == LINK_ARB_USB) usb_send_raw(buf, n);
+    else                                  HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)n, 100);
+}
+
+/* [P2 双链路仲裁] 调参会话激活判据 (会话锁注入, 设计文档 §2.3) */
+static uint8_t arb_session_active(void)
+{
+    return (g_step_active || g_tel_on || g_rec_on || g_odom_on || g_itel_mode) ? 1u : 0u;
+}
+
+/* [P2 双链路仲裁] 广播出口注入 */
+static void arb_broadcast(const char *msg)
+{
+    link_owner_tx(msg, (int)strlen(msg));
+}
+
+/* [P2 双链路仲裁] ⚠️ 编号换算: main 消费循环 0=UART/1=USB, 仲裁枚举 0=USB/1=UART
+ * — 两套编号相反, 直接比较必错 (2026-09-19 真机抓出: 门控形同虚设) */
+static uint8_t owner_main_link(void)
+{
+    return (link_arb_owner() == LINK_ARB_USB) ? LINK_USB : LINK_UART;
 }
 
 /* 裸发送: 不记录 OLED 应答页 (寻迹诊断等高频事件用) */
 static void tx_raw(const char *buf, int n)
 {
-    HAL_UART_Transmit(&huart2, (uint8_t *)buf, n, 100);
+    link_tx(buf, n);
 }
 
 /* 文本回应: 发送 + 记录到 OLED 页4 (指令接收后的回复, 无线调试确认) */
@@ -319,27 +409,66 @@ static void oled_line(uint8_t page, const char *s)
 }
 /* USER CODE END 0 */
 
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
 
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-    SystemClock_Config();
 
-    /* 外设初始化 */
-    MX_GPIO_Init();
-    MX_TIM1_Init();
-    MX_TIM2_Init();
-    MX_TIM3_Init();
-    MX_USART2_UART_Init();
-    MX_TIM4_Init();
-    MX_I2C2_Init();
+  /* USER CODE BEGIN Init */
 
-    /* USER CODE BEGIN 2 */
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_DMA_Init();
+  MX_TIM1_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
+  MX_USART2_UART_Init();
+  MX_TIM4_Init();
+  MX_I2C2_Init();
+  MX_USB_DEVICE_Init();
+  /* USER CODE BEGIN 2 */
+#ifdef USB_ECHO_TEST
+    /* ---- USB 独立链路测试模式 (临时) ----
+     * USB 已在上方 MX_USB_DEVICE_Init 完成; 此处不再 init 任何车功能
+     * (电机/编码器/PWM/舵机/OLED/IMU/巡线/串口全不启动), 主循环空转,
+     * 收发逻辑全部在 usbd_cdc_if.c 的 CDC_Receive_FS (中断上下文)。
+     * 验证目标: 枚举成 COMx + PING->PONG + 回显完整性。 */
+    for (;;) { HAL_Delay(1); }
+#endif
     /* ---- UART (BT04 蓝牙串口) ----
      * PA2/PA3 现接 BT04, 透明传输波特率 9600, 覆盖 CubeMX 默认 115200 */
     huart2.Init.BaudRate = 9600;
     if (HAL_UART_Init(&huart2) != HAL_OK) Error_Handler();
-    ringbuf_init(&g_ringbuf_debug);
+    ringbuf_init(&g_ringbuf_uart);
+    ringbuf_init(&g_ringbuf_usb);   /* [P1 双链路] */
+
+    /* ---- [P2 双链路仲裁] 上电 usb_alive = 未知(-1): 枚举异步完成, 由宽限期逻辑兜底 ---- */
+    {
+        LinkArbCfg ac = { .session_active = arb_session_active,
+                          .broadcast      = arb_broadcast,
+                          .boot_grace_ms  = 3000 };
+        link_arb_init(&ac, -1, HAL_GetTick());
+    }
     HAL_UART_Receive_IT(&huart2, &uart_debug.rx_byte, 1);
     HAL_UART_Transmit(&huart2, (uint8_t *)"UART2 Ready\r\n", 13, 100);
 
@@ -400,52 +529,85 @@ int main(void)
      *   "init 失败即停"实锤，详调试总结 §22。验证后已还原此行。） */
     if (odom_init(&g_odom_cfg, &g_odom_io) != ODOM_OK)
         Error_Handler();
-    /* USER CODE END 2 */
+  /* USER CODE END 2 */
 
-    /* ---- 主循环 ---- */
-    uint8_t  frame[32];
-    uint8_t  f_len = 0;
-    uint8_t  in_frame = 0;
-    uint32_t t_pid = 0;
-    uint32_t t_disp = 0;
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  /* ---- 主循环局部状态 (原在 USER CODE 外, 2026-09-19 regen 曾被 CubeMX 整段吞掉 — 教训: 主循环内容必须住 USER CODE 区) ---- */
+  /* [P1 双链路] 解析状态按链路独立: 命令级交织消费要求两链路帧/行状态互不干扰 */
+  static uint8_t txt[LINK_COUNT][20];
+  static uint8_t txt_len[LINK_COUNT] = {0, 0};
+  uint8_t  frame[LINK_COUNT][32];
+  uint8_t  f_len[LINK_COUNT] = {0, 0};
+  uint8_t  in_frame[LINK_COUNT] = {0, 0};
+  uint32_t t_frame[LINK_COUNT] = {0, 0};
+  uint32_t t_pid = 0;
+  uint32_t t_disp = 0;
+  uint8_t  b;
 
-    while (1)
-    {
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
         /* ① 串口命令解析 — 一次读完 ringbuf 所有积压字节 */
-        static uint8_t txt[20];
-        static uint8_t txt_len = 0;
+        static uint8_t txt[LINK_COUNT][20];
+        static uint8_t txt_len[LINK_COUNT];
         uint8_t b;
-        while (ringbuf_read(&g_ringbuf_debug, &b) == 0) {
-            g_last_rx_tick = HAL_GetTick();   /* 看门狗: 任何下行字节都算"活" */
-            g_wd_fired = 0;                   /* 解除触发闩锁 (断链恢复即重新武装) */
-            if (b == 0xAA && !in_frame) { f_len = 0; in_frame = 1; t_frame = HAL_GetTick(); }
-            if (in_frame) {
-                if (f_len >= sizeof(frame)) { in_frame = 0; continue; }
-                frame[f_len++] = b;
-                t_frame = HAL_GetTick();
-                if (f_len >= 2 && frame[f_len-2] == 0xFF && frame[f_len-1] == 0xFF) {
-                    uint8_t cmd = frame[1], flen = f_len - 2;
-                    if      (cmd == 0x01 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); speed_loop_set_target(id, v); cmd_note("M%d=%dRPM", id, (int)((v>0)?v:-v)); ack("M%d:%dRPM\r\n",id,(int)(v+0.5f)); }
-                    else if (cmd == 0x02 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); line_follower_enable(0); (void)motor_bridge_set_speed_mps(id,v); cmd_note("M%d=%dcm/s", id, (int)(v*100)); ack("M%d:%dcm/s\r\n",id,(int)(v*100+0.5f)); }
-                    else if (cmd == 0x03 && flen >= 3 && frame[2] < 2) { uint8_t id = frame[2]; line_follower_enable(0); speed_loop_stop(id); cmd_note("BRK%d", id); ack("M%d:BRAKE\r\n",id); }
-                    else if (cmd == 0x10 && flen >= 7 && frame[2] < 1) { float v; memcpy(&v,&frame[3],4); steering_set(v); float a = steering_get(); cmd_note("SV=%d.%d", (int)a, dec1(a)); ack("SV:%d.%d\r\n", (int)a, dec1(a)); }
-                    else if (cmd == 0xE0 && flen >= 15 && frame[2] < 2) { uint8_t id = frame[2]; float kp,ki,kd; memcpy(&kp,&frame[3],4); memcpy(&ki,&frame[7],4); memcpy(&kd,&frame[11],4); speed_loop_set_gains(id,kp,ki,kd); cmd_note("PID%d", id); ack("OK\r\n"); }
-                    else if (cmd == 0x20 && flen >= 7 && frame[2] < 2) { uint8_t id = frame[2]; float v; memcpy(&v,&frame[3],4); if (v >= -100.0f && v <= 100.0f) { line_follower_enable(0); (void)motor_bridge_set_rate_0E3(id, (int16_t)(v * 10.0f)); cmd_note("DUTY%d", id); ack("D%d:%d.%d\r\n", id, (int)v, dec1(v)); } else { cmd_note("DUTY BAD"); ack("?\r\n"); } }
+        /* [P1 双链路] 命令级交织消费: 每链路每轮最多 LINK_BYTE_BUDGET 字节
+         * (时间片封顶, 见 doc/双链路仲裁设计文档.md §3.2); 执行完一条命令
+         * 再回来读下一条, 双链路按行/帧粒度交错, 谁也不饿死谁 */
+        for (uint8_t li = 0; li < LINK_COUNT; li++) {
+          uint8_t budget = LINK_BYTE_BUDGET;
+          while (budget-- && ringbuf_read(g_link_rb[li], &b) == 0) {
+            g_active_link = li;   /* 应答路由: 谁的命令回谁 (P2 由 link_arbiter 取代) */
+            if (li == LINK_UART) { g_last_uart_rx_tick = HAL_GetTick(); g_uart_seen = 1; }
+            if (li == owner_main_link()) {   /* [P2] WD 只盯 owner 链路 (设计文档 §6) */
+                g_last_rx_tick = HAL_GetTick();   /* 看门狗: owner 链路下行字节算"活" */
+                g_wd_fired = 0;                   /* 解除触发闩锁 (断链恢复即重新武装) */
+            }
+            if (b == 0xAA && !in_frame[li]) { f_len[li] = 0; in_frame[li] = 1; t_frame[li] = HAL_GetTick(); }
+            if (in_frame[li]) {
+                if (f_len[li] >= sizeof(frame[li])) { in_frame[li] = 0; continue; }
+                frame[li][f_len[li]++] = b;
+                t_frame[li] = HAL_GetTick();
+                if (f_len[li] >= 2 && frame[li][f_len[li]-2] == 0xFF && frame[li][f_len[li]-1] == 0xFF) {
+                    uint8_t cmd = frame[li][1], flen = f_len[li] - 2;
+                    /* [P2 仲裁门控] 二进制帧: 非 owner 仅放行心跳 0xF0, 其余回 BUSY 拒绝 */
+                    if (li != owner_main_link() && cmd != 0xF0) {
+                        cmd_note("BUSY");
+                        ack("BUSY:%s\r\n", (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART");
+                    }
+                    else if      (cmd == 0x01 && flen >= 7 && frame[li][2] < 2) { uint8_t id = frame[li][2]; float v; memcpy(&v,&frame[li][3],4); line_follower_enable(0); speed_loop_set_target(id, v); cmd_note("M%d=%dRPM", id, (int)((v>0)?v:-v)); ack("M%d:%dRPM\r\n",id,(int)(v+0.5f)); }
+                    else if (cmd == 0x02 && flen >= 7 && frame[li][2] < 2) { uint8_t id = frame[li][2]; float v; memcpy(&v,&frame[li][3],4); line_follower_enable(0); (void)motor_bridge_set_speed_mps(id,v); cmd_note("M%d=%dcm/s", id, (int)(v*100)); ack("M%d:%dcm/s\r\n",id,(int)(v*100+0.5f)); }
+                    else if (cmd == 0x03 && flen >= 3 && frame[li][2] < 2) { uint8_t id = frame[li][2]; line_follower_enable(0); speed_loop_stop(id); cmd_note("BRK%d", id); ack("M%d:BRAKE\r\n",id); }
+                    else if (cmd == 0x10 && flen >= 7 && frame[li][2] < 1) { float v; memcpy(&v,&frame[li][3],4); steering_set(v); float a = steering_get(); cmd_note("SV=%d.%d", (int)a, dec1(a)); ack("SV:%d.%d\r\n", (int)a, dec1(a)); }
+                    else if (cmd == 0xE0 && flen >= 15 && frame[li][2] < 2) { uint8_t id = frame[li][2]; float kp,ki,kd; memcpy(&kp,&frame[li][3],4); memcpy(&ki,&frame[li][7],4); memcpy(&kd,&frame[li][11],4); speed_loop_set_gains(id,kp,ki,kd); cmd_note("PID%d", id); ack("OK\r\n"); }
+                    else if (cmd == 0x20 && flen >= 7 && frame[li][2] < 2) { uint8_t id = frame[li][2]; float v; memcpy(&v,&frame[li][3],4); if (v >= -100.0f && v <= 100.0f) { line_follower_enable(0); (void)motor_bridge_set_rate_0E3(id, (int16_t)(v * 10.0f)); cmd_note("DUTY%d", id); ack("D%d:%d.%d\r\n", id, (int)v, dec1(v)); } else { cmd_note("DUTY BAD"); ack("?\r\n"); } }
                     else if (cmd == 0xF0) { cmd_note("PING->PONG"); ack("PONG\r\n"); }
                     else { cmd_note("ERR:%02X", cmd); ack("?\r\n"); }
-                    in_frame = 0; f_len = 0;
+                    in_frame[li] = 0; f_len[li] = 0;
                 }
                 continue;
             }
             if (b == '\r') continue;  /* 兼容手机APP "\r\n" 行尾: 否则 "PING\r" 匹配失败 */
-            if (b == '\n') txt[txt_len] = 0;
-            else if (txt_len < 19) { txt[txt_len++] = b; continue; }
-            if (txt_len > 0) {
+            if (b == '\n') txt[li][txt_len[li]] = 0;
+            else if (txt_len[li] < 19) { txt[li][txt_len[li]++] = b; continue; }
+            if (txt_len[li] > 0) {
                 /* 文本命令解析已模块化到 txt_cmd.c (PC 测试桩覆盖 41 用例),
                  * 手写数值解析替代 sscanf %f (newlib-nano 缺 _scanf_float 静默失败) */
                 TxtCmd tc;
-                if (txt_cmd_parse((char *)txt, &tc)) {
-                    switch (tc.type) {
+                if (txt_cmd_parse((char *)txt[li], &tc)) {
+                    /* [P2 仲裁门控] 非 owner 链路仅放行 安全例外命令 (STOP/PING/LINK,
+                     * 设计文档 §2.2); 其余回 BUSY:<owner> 拒绝 */
+                    if (li != owner_main_link() &&
+                        tc.type != TXTCMD_PING && tc.type != TXTCMD_STOP &&
+                        tc.type != TXTCMD_LINK) {
+                        cmd_note("BUSY");
+                        ack("BUSY:%s\r\n",
+                            (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART");
+                    }
+                    else switch (tc.type) {
                     case TXTCMD_PING:
                         cmd_note("PING->PONG");
                         ack("PONG\r\n");
@@ -700,6 +862,23 @@ int main(void)
                         cmd_note("ICAL GO");
                         ack("ICAL:GO\r\n");
                         break;
+                    case TXTCMD_LINK:
+                        /* [P2 双链路仲裁] 查询/切换 — 任意链路可发 (安全例外, 设计文档 §2.2);
+                         * 让出/接管/抢回三语义合一: 目标=对方即切换, 目标=自己即无操作 */
+                        if (tc.i0 < 0) {
+                            cmd_note("OWNER:%s", link_arb_owner() == LINK_ARB_USB ? "USB" : "UART");
+                            ack("OWNER:%s\r\n", (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART");
+                        } else {
+                            LinkArbRet r = link_arb_request(tc.i0 == 1 ? LINK_ARB_UART : LINK_ARB_USB);
+                            if (r == LINK_ARB_OK) {
+                                cmd_note("LINK:%s", tc.i0 == 1 ? "UART" : "USB");
+                                ack("LINK:%s OK\r\n", (tc.i0 == 1) ? "UART" : "USB");
+                            } else {       /* ERR_SESSION — 会话锁 */
+                                cmd_note("BUSY SESSION");
+                                ack("BUSY:SESSION\r\n");
+                            }
+                        }
+                        break;
                     default:
                         break;
                     }
@@ -709,17 +888,27 @@ int main(void)
                     ack("?\r\n");
                 }
             }
-            txt_len = 0;
+            txt_len[li] = 0;
+          }
         }
 
-        /* 无线丢包保护: 二进制帧不完整超过 100ms 丢弃, 重新同步
+        /* 无线丢包保护(按链路): 二进制帧不完整超过 100ms 丢弃, 重新同步
          * (无线链路可能吞掉帧尾 0xFF 0xFF, 不复位会卡住后续解析) */
-        if (in_frame && (HAL_GetTick() - t_frame) > 100) { in_frame = 0; f_len = 0; }
+        for (uint8_t li = 0; li < LINK_COUNT; li++)
+            if (in_frame[li] && (HAL_GetTick() - t_frame[li]) > 100) { in_frame[li] = 0; f_len[li] = 0; }
 
         /* ② PID 独立运行 — 每 50ms，不受 OLED 拖累 */
         uint32_t now = HAL_GetTick();
         if (now - t_pid >= 50) {
             t_pid = now;
+
+            /* ═══ [P2 双链路仲裁] USB 判活喂入 (每控制节拍一次; 内部做边沿检测:
+             *  失联 → 自动 failover + 广播; 恢复 → 仅广播 USB READY 不抢回) ═══ */
+            {
+                uint8_t alive = (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
+                                 hUsbDeviceFS.pClassData != NULL && g_usb_dtr) ? 1u : 0u;
+                (void)link_arb_notify((int8_t)alive, now);
+            }
 
             /* ═══ 命令看门狗: 超时无任何下行字节 → 急停一次 (闩锁防刷屏) ═══
              * 断链恢复 = 收到任意字节自动解除闩锁 (主循环喂狗处), 无需重新配置 */
@@ -939,27 +1128,43 @@ int main(void)
             case 6: /* 最近执行的命令 (无线命令执行确认) */
                 snprintf(b,26,"CMD:%-16s", s_last_cmd);
                 oled_line(6,b); break;
-            default: /* 页7: 寻迹 + 校准 + 转弯状态 */
-                if (prog < 100) {
-                    snprintf(b,26,"CAL:%d%%  AUTO:%d", prog, line_follower_auto());
-                } else if (!line_follower_enabled()) {
-                    snprintf(b,26,"LINE:OFF SPD:%d", (int)line_follower_base_spd());
-                } else {
-                    const char *st[] = {"FOLLOW","?","TURNING","EXIT","SEARCH"};
-                    uint8_t ls = line_follower_state();
-                    snprintf(b,26,"LINE %s SPD:%d", st[ls>4?0:ls], (int)line_follower_base_spd());
-                }
+            default: /* 页7: 链路状态 (2026-09-19 替换原巡线状态页 — 巡线编译期剔除;
+                      * 恢复巡线时从 git 找回本页原实现并另开显示页) */
+            {
+                /* USB: 枚举+配置完成即 ON (DTR 级判活 P2 落地后细化为"应用已打开")
+                 * UART: MCU 无法感知 SPP 连接态, 显示距最近收字节的秒数 (从未收过显 "-") */
+                uint8_t usb_on = (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
+                                  hUsbDeviceFS.pClassData != NULL);
+                char us[10];
+                if (g_uart_seen)
+                    snprintf(us, sizeof(us), "%lus",
+                             (unsigned long)((HAL_GetTick() - g_last_uart_rx_tick) / 1000));
+                else
+                    snprintf(us, sizeof(us), "-");
+                snprintf(b,26,"L:%s USB:%s U:%s",
+                         (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART",
+                         usb_on ? "ON" : "OFF", us);
                 oled_line(7,b); break;
             }
+            }
             s_disp_page = (s_disp_page + 1) & 7;
-        }
-    }
+        }  }
+  /* USER CODE END 3 */
 }
 
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
@@ -967,14 +1172,63 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) Error_Handler();
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB;
+  PeriphClkInit.UsbClockSelection = RCC_USBCLKSOURCE_PLL_DIV1_5;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
-void Error_Handler(void) { __disable_irq(); while (1) { } }
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
