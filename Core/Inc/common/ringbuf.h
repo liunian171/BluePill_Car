@@ -36,15 +36,24 @@
 #include <stdint.h>
 
 /** @brief 环形缓冲区容量。
- *          uint8_t 索引下最大 255，当前 128 对 9600/115200 波特率够用。 */
-#define RINGBUF_SIZE  128
+ *
+ *  ⚠️ **上限 255**：head/tail 为 uint8_t（单字节读写原子性好，中断/主循环天然无锁），
+ *     故 RINGBUF_SIZE 不得取 256（回绕与"满"判据会失效）。
+ *
+ *  取值依据（2026-09-19 实测订正，原值 128 = 容量 127B 偏小）：
+ *    · USB 侧：突发命令 ≥30 条（150B）即溢出丢应答，丢失量 ≈ (N−127)B 定量吻合；
+ *              突发 60 条丢 31 条（一半）——实测见 doc/节拍拉长与I2C总线专案.md §5
+ *    · UART 侧：9600 → 127B 仅 132ms 缓冲（原文档宣称 266ms）→ 240 给回 239ms
+ */
+#define RINGBUF_SIZE  240
 
 /** @brief 环形缓冲区结构体
  *
- *  内存布局（RINGBUF_SIZE=128, 共 132 字节）：
- *    byte 0~127 : buf[128]      — 数据本体
- *    byte 128   : head (volatile)— 写索引（中断更新）
- *    byte 129   : tail           — 读索引（主循环更新）
+ *  内存布局（RINGBUF_SIZE=240, 共 244 字节）：
+ *    byte 0~239 : buf[240]       — 数据本体
+ *    byte 240   : head (volatile)— 写索引（中断更新）
+ *    byte 241   : tail           — 读索引（主循环更新）
+ *    byte 242   : overflow       — 累计溢出丢字节数（饱和 255，中断写/主循环读）
  *
  *  状态判断：
  *    空：head == tail
@@ -56,6 +65,7 @@ typedef struct
     uint8_t          buf[RINGBUF_SIZE];   /* 数据缓冲区 */
     volatile uint8_t head;                /* 写索引 — 中断上下文更新 */
     uint8_t          tail;                /* 读索引 — 主循环上下文更新 */
+    volatile uint8_t overflow;            /* 满丢弃计数 — 饱和 255（"丢过数据必须可见"） */
 } RingBuffer;
 
 
@@ -74,5 +84,9 @@ int8_t   ringbuf_read(RingBuffer *rb, uint8_t *byte);
 
 /** @brief 返回缓冲区中未读字节数 */
 uint16_t ringbuf_num_available(RingBuffer *rb);
+
+/** @brief 返回累计溢出丢弃字节数（饱和 255）—— 0 表示未丢过
+ *  ▸ 用途：丢过数据必须可见（设计文档 §3.3 契约）；显示于 OLED 页 7 */
+uint8_t  ringbuf_overflow(RingBuffer *rb);
 
 #endif /* __RINGBUF_H__ */

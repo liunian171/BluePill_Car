@@ -14,6 +14,10 @@
  *
  *  ▸ 显示链错误策略 ▸ 按"尽力而为"：写失败不刷屏、不打断控制链
  *    （显示是辅助通道，不应因 I2C 异常阻塞 50ms 控制环——2026-09-13 实测踩坑）
+ *    **但失败必须可见**（2026-09-19 节拍拉长专案补）：显示链曾因"沉默重试"把
+ *    主循环拖到 100ms（OLED 排线接触不良 × 平台超时）而无人察觉 → 现补两项：
+ *    ① 器件层连续失败熔断（`oled_driver.cpp`，失败代价有硬上界）
+ *    ② 失败计数经本桥暴露（`oled_bridge_tx_fail_count`），组装层显示于 OLED 页 7
  * ============================================================================
  */
 
@@ -43,6 +47,13 @@ void oled_bridge_show_string(uint8_t row, uint8_t col, const char *str);
 void oled_bridge_show_chinese(uint8_t row, uint8_t col, uint8_t index);
 void oled_bridge_show_string_small(uint8_t page, uint8_t col, const char *str);
 void oled_bridge_show_line_small(uint8_t page, const char *str);   /* 整行单事务写入 */
+
+/* ---- 诊断接口（取值类：无副作用，可随时调用）---- */
+/** @brief 累计写事务失败次数（0 = 从未失败；非 0 = 屏/排线有问题，见专案文档） */
+uint16_t oled_bridge_tx_fail_count(void);
+
+/** @brief 熔断状态：1 = 处于停刷冷却期（连续失败后主动静默，约 3s 后自动重试） */
+uint8_t  oled_bridge_fused(void);
 
 #ifdef __cplusplus
 }

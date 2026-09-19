@@ -72,10 +72,27 @@ public:
      */
     void show_line_small(uint8_t page, const char *str);
 
+    /**
+     * @brief 累计写事务失败次数（诊断：只增不减）
+     *
+     *  ▸ 存在意义（2026-09-19 节拍拉长专案）◂
+     *    显示链是"尽力而为"，失败既不刷屏也不打断控制链 —— 但**沉默失败**曾让
+     *    OLED 排线接触不良持续吃掉 100ms/轮（控制环减半）而无人察觉。
+     *    失败必须可见 ⇒ 计数经 oled_bridge 暴露，组装层显示于 OLED 页 7。
+     */
+    uint16_t tx_fail_count() const { return tx_fail_; }
+
+    /** @brief 熔断状态：1 = 处于"停刷冷却期"（连续失败后主动静默，等待重新试探） */
+    uint8_t  fused() const { return (skip_left_ != 0) ? 1u : 0u; }
+
 private:
     void *        ctx_   = 0;   /* 平台资源 */
     oled_write_fn write_ = 0;   /* 写事务注入 */
     uint8_t       addr_  = 0;   /* 从机 7 位地址 */
+
+    uint16_t      tx_fail_     = 0;   /* 累计写失败（诊断计数，饱和于 65535） */
+    uint8_t       fail_streak_ = 0;   /* 连续失败次数（成功即清零） */
+    uint8_t       skip_left_   = 0;   /* 冷却期剩余跳过次数（>0 = 熔断中） */
 
     void write(uint8_t reg, const uint8_t *data, uint16_t len);
     void write_cmd(uint8_t cmd);

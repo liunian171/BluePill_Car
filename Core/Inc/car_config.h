@@ -22,8 +22,9 @@
  *             12+ 处 line_follower_enable(0) 接管权调用自然变 no-op）
  *
  *  ▸ 改动流程 ◂
- *    ① 改下面的宏值 → ② 必须重新 cmake --preset Debug（GLOB/取舍在 configure
- *    期完成，只 build 不会生效）→ ③ 编译看 Flash/RAM → ④ 回写开发跟踪。
+ *    ① 改下面的宏值 → ② 必须重新 `cmake --preset Release`（GLOB/取舍在 configure
+ *    期完成，只 build 不会生效；**必须 Release**：Debug(-O0) 链接溢出 64KB，
+ *    见 AGENTS §三）→ ③ 编译看 Flash/RAM → ④ 回写开发跟踪。
  *
  *  ▸ 标定集中（待办 3②）◂
  *    本文件将来兼收整车标定表（PPR / max_rpm / 轮距等，现散在 main.c 配置

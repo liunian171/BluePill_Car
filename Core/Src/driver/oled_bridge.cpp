@@ -39,3 +39,15 @@ void oled_bridge_show_line_small(uint8_t page, const char *str)
 {
     g_oled.show_line_small(page, str);
 }
+
+/* ---- 诊断接口（2026-09-19 节拍拉长专案补：失败必须可见）---- */
+
+uint16_t oled_bridge_tx_fail_count(void)
+{
+    return g_oled.tx_fail_count();
+}
+
+uint8_t oled_bridge_fused(void)
+{
+    return g_oled.fused();
+}

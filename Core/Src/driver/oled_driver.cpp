@@ -17,10 +17,41 @@
 #include "oled_driver.h"
 #include "oled_font.h"
 
-/* 写事务：显示链按"尽力而为"处理，忽略返回码（错误不刷屏、不打断控制链） */
+/* ▸ 失败熔断参数（2026-09-19 节拍拉长专案结案后新增）◂
+ *
+ *  背景（实测）：OLED 排线接触不稳 → 每笔写事务吃满平台超时 → 显示块耗时暴涨，
+ *  而显示块基准在块首赋值 → 每轮主循环都会到期 → **pass 被锁死 100ms 级**
+ *  → 50ms 速度环减半（ODOM 20→10Hz、ATT 10→5Hz）。
+ *
+ *  策略：连续失败达阈值即进入冷却 —— 冷却期**完全不发 I2C**（零阻塞），到期自动
+ *        再试探一次，成功即恢复。作用 = 给"坏屏"的最坏代价一个硬上界：
+ *        熔断前 ≤ 阈值×20ms，熔断后每 3s 只花 2 笔事务。
+ *  权衡：冷却期屏幕保持黑屏 —— 对坏屏而言本就不该假装正常。
+ *
+ *  单位说明：以下计数以**写事务**计（1 次整行刷新 = set_pos + 128B = 2 笔）。 */
+#define OLED_FAIL_STREAK_MAX    6u    /* 连续失败阈值（≈6×20ms 后熔断） */
+#define OLED_FUSE_SKIP_WRITES  60u    /* 冷却长度：跳过 60 笔 ≈ 30 次刷新 ≈ 3s */
+
+/* 写事务：显示链按"尽力而为"处理（错误不刷屏、不打断控制链），但**失败计数可见** */
 void OledDriver::write(uint8_t reg, const uint8_t *data, uint16_t len) {
     if (write_ == 0) return;
-    (void)write_(ctx_, addr_, reg, data, len);
+
+    if (skip_left_ != 0) {              /* 熔断冷却期：不发 I2C，到期自动试探 */
+        skip_left_--;
+        return;
+    }
+
+    if (write_(ctx_, addr_, reg, data, len) == 0) {
+        fail_streak_ = 0;               /* 成功 → 复位连续失败 */
+        return;
+    }
+
+    if (tx_fail_ < 0xFFFFu) tx_fail_++;          /* 诊断计数只增不减 */
+    if (fail_streak_ < 255u) fail_streak_++;
+    if (fail_streak_ >= OLED_FAIL_STREAK_MAX) {  /* 连续失败 → 熔断 */
+        fail_streak_ = 0;
+        skip_left_   = OLED_FUSE_SKIP_WRITES;
+    }
 }
 
 /* ========================================================================== */

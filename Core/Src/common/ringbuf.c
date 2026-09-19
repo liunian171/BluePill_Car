@@ -31,17 +31,21 @@ void ringbuf_init(RingBuffer *rb)
  *  ringbuf_write — 写入 1 字节（中断中调用）
  *
  *  ① 算出 head 的下一步位置
- *  ② 下一步 == tail  → 满，丢弃新数据（return）
+ *  ② 下一步 == tail  → 满，**记一次溢出**并丢弃新数据（return）
  *  ③ 否则写入 buf[head]，head 前进一步
  *
  *  复杂度：O(1)，< 1μs（在 180MHz STM32F4 上）
+ *  ⚠️ overflow 计数在中断中写、主循环中读：uint8_t 单字节读写原子，无需临界区；
+ *     饱和在 255（诊断用途，只需回答"有没有丢、丢过多少量级"）
  *==============================================================================*/
 void ringbuf_write(RingBuffer *rb, uint8_t byte)
 {
     uint8_t next_head = (rb->head + 1) % RINGBUF_SIZE;
 
-    if (next_head == rb->tail)               /* 满 — 丢弃新数据 */
+    if (next_head == rb->tail) {              /* 满 — 丢弃新数据 */
+        if (rb->overflow < 255u) rb->overflow++;   /* 丢过必须可见 */
         return;
+    }
 
     rb->buf[rb->head] = byte;                /* 写入 */
     rb->head           = next_head;          /* head 进位 */
@@ -76,4 +80,13 @@ int8_t ringbuf_read(RingBuffer *rb, uint8_t *byte)
 uint16_t ringbuf_num_available(RingBuffer *rb)
 {
     return (rb->head - rb->tail + RINGBUF_SIZE) % RINGBUF_SIZE;
+}
+
+
+/*==============================================================================
+ *  ringbuf_overflow — 累计溢出丢弃字节数（饱和 255）
+ *==============================================================================*/
+uint8_t ringbuf_overflow(RingBuffer *rb)
+{
+    return rb->overflow;
 }

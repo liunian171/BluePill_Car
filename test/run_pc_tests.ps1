@@ -61,5 +61,13 @@ if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
 if ($LASTEXITCODE -ne 0) { $failed++ }
 
 Write-Host ""
+Write-Host "== 编译+运行: ringbuf 通用算法层测试桩 (容量/溢出可见性) =="
+& $gcc -Wall -Wextra @incs -o build/pc_test_ringbuf.exe `
+    test/host_ringbuf_test.c Core/Src/common/ringbuf.c
+if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
+& build\pc_test_ringbuf.exe
+if ($LASTEXITCODE -ne 0) { $failed++ }
+
+Write-Host ""
 if ($failed -eq 0) { Write-Host "== 全部测试桩通过 ==" } else { Write-Host "== 有 $failed 组测试失败 ==" }
 exit $failed

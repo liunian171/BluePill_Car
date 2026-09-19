@@ -534,16 +534,15 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   /* ---- 主循环局部状态 (原在 USER CODE 外, 2026-09-19 regen 曾被 CubeMX 整段吞掉 — 教训: 主循环内容必须住 USER CODE 区) ---- */
-  /* [P1 双链路] 解析状态按链路独立: 命令级交织消费要求两链路帧/行状态互不干扰 */
-  static uint8_t txt[LINK_COUNT][20];
-  static uint8_t txt_len[LINK_COUNT] = {0, 0};
+  /* [P1 双链路] 解析状态按链路独立: 命令级交织消费要求两链路帧/行状态互不干扰
+   * 注: txt/txt_len/b 在下方循环内声明 (2026-09-19 清理: 此处原有一份 regen 残留
+   *     重复声明, 被循环内同名变量遮蔽, 属死声明) */
   uint8_t  frame[LINK_COUNT][32];
   uint8_t  f_len[LINK_COUNT] = {0, 0};
   uint8_t  in_frame[LINK_COUNT] = {0, 0};
   uint32_t t_frame[LINK_COUNT] = {0, 0};
   uint32_t t_pid = 0;
   uint32_t t_disp = 0;
-  uint8_t  b;
 
   while (1)
   {
@@ -578,8 +577,8 @@ int main(void)
                         cmd_note("BUSY");
                         ack("BUSY:%s\r\n", (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART");
                     }
-                    else if      (cmd == 0x01 && flen >= 7 && frame[li][2] < 2) { uint8_t id = frame[li][2]; float v; memcpy(&v,&frame[li][3],4); line_follower_enable(0); speed_loop_set_target(id, v); cmd_note("M%d=%dRPM", id, (int)((v>0)?v:-v)); ack("M%d:%dRPM\r\n",id,(int)(v+0.5f)); }
-                    else if (cmd == 0x02 && flen >= 7 && frame[li][2] < 2) { uint8_t id = frame[li][2]; float v; memcpy(&v,&frame[li][3],4); line_follower_enable(0); (void)motor_bridge_set_speed_mps(id,v); cmd_note("M%d=%dcm/s", id, (int)(v*100)); ack("M%d:%dcm/s\r\n",id,(int)(v*100+0.5f)); }
+                    else if      (cmd == 0x01 && flen >= 7 && frame[li][2] < 2) { uint8_t id = frame[li][2]; float v; memcpy(&v,&frame[li][3],4); line_follower_enable(0); speed_loop_set_target(id, v); cmd_note("M%d=%dRPM", id, (int)((v>0)?v:-v)); ack("M%d:%dRPM\r\n",id,spd_to_int(v)); }
+                    else if (cmd == 0x02 && flen >= 7 && frame[li][2] < 2) { uint8_t id = frame[li][2]; float v; memcpy(&v,&frame[li][3],4); line_follower_enable(0); (void)motor_bridge_set_speed_mps(id,v); cmd_note("M%d=%dcm/s", id, (int)(v*100)); ack("M%d:%dcm/s\r\n",id,spd_to_int(v*100.0f)); }
                     else if (cmd == 0x03 && flen >= 3 && frame[li][2] < 2) { uint8_t id = frame[li][2]; line_follower_enable(0); speed_loop_stop(id); cmd_note("BRK%d", id); ack("M%d:BRAKE\r\n",id); }
                     else if (cmd == 0x10 && flen >= 7 && frame[li][2] < 1) { float v; memcpy(&v,&frame[li][3],4); steering_set(v); float a = steering_get(); cmd_note("SV=%d.%d", (int)a, dec1(a)); ack("SV:%d.%d\r\n", (int)a, dec1(a)); }
                     else if (cmd == 0xE0 && flen >= 15 && frame[li][2] < 2) { uint8_t id = frame[li][2]; float kp,ki,kd; memcpy(&kp,&frame[li][3],4); memcpy(&ki,&frame[li][7],4); memcpy(&kd,&frame[li][11],4); speed_loop_set_gains(id,kp,ki,kd); cmd_note("PID%d", id); ack("OK\r\n"); }
@@ -1085,7 +1084,7 @@ int main(void)
             line_follower_try_auto_start(prog >= 100, now);
 
             /* OLED 分页轮转: 单页单事务写入, 定宽补齐无残留, 免清屏 */
-            char b[26];
+            char b[32];   /* 32B: 页7 链路行最长 ~29B (E/O 计数为多位时), 留足避免截断告警 */
             static uint8_t s_disp_page = 0;
             switch (s_disp_page) {
             case 0: /* IMU 欧拉角 */
@@ -1128,8 +1127,10 @@ int main(void)
             case 6: /* 最近执行的命令 (无线命令执行确认) */
                 snprintf(b,26,"CMD:%-16s", s_last_cmd);
                 oled_line(6,b); break;
-            default: /* 页7: 链路状态 (2026-09-19 替换原巡线状态页 — 巡线编译期剔除;
-                      * 恢复巡线时从 git 找回本页原实现并另开显示页) */
+            default: /* 页7: 链路状态 + 健康计数 (2026-09-19 节拍拉长专案: **失败必须可见**;
+                      * 原巡线状态页已编译期剔除, 恢复巡线时从 git 找回另开显示页)
+                      * 字段: L=owner / USB:ON|OFF 或 E=OLED写失败累计 O=ringbuf溢出累计
+                      *       / 末列 = UART 静默秒数 或 FZ=OLED 已熔断停刷 */
             {
                 /* USB: 枚举+配置完成即 ON (DTR 级判活 P2 落地后细化为"应用已打开")
                  * UART: MCU 无法感知 SPP 连接态, 显示距最近收字节的秒数 (从未收过显 "-") */
@@ -1141,9 +1142,19 @@ int main(void)
                              (unsigned long)((HAL_GetTick() - g_last_uart_rx_tick) / 1000));
                 else
                     snprintf(us, sizeof(us), "-");
-                snprintf(b,26,"L:%s USB:%s U:%s",
-                         (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART",
-                         usb_on ? "ON" : "OFF", us);
+
+                uint16_t oled_e = oled_bridge_tx_fail_count();
+                uint16_t rb_ovf = (uint16_t)ringbuf_overflow(&g_ringbuf_uart) +
+                                  (uint16_t)ringbuf_overflow(&g_ringbuf_usb);
+                if (oled_e || rb_ovf)     /* 有异常才挤掉 USB 状态字段, 正常态保持原版式 */
+                    snprintf(b,sizeof(b),"L:%s E%d O%d %s",
+                             (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART",
+                             (int)oled_e, (int)rb_ovf,
+                             oled_bridge_fused() ? "FZ" : us);
+                else
+                    snprintf(b,sizeof(b),"L:%s USB:%s U:%s",
+                             (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART",
+                             usb_on ? "ON" : "OFF", us);
                 oled_line(7,b); break;
             }
             }
