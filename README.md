@@ -418,6 +418,7 @@ print(ser.readline())        # b'M0:60RPM\r\n'
 |------|------|
 | `link_probe.py` | **双链路统一探测**：扫口 + 归类（USB CDC / BT04 / 其它蓝牙）+ 逐口隔离 `PING` 探测 + 报 owner + 结果存档（`tools/data/link_probe.txt`）；`--wait` 轮询等连接、`--pair` 配对引导、`--echo` USB 回显用例（需 `USB_ECHO_TEST` 固件） |
 | `bt_connect.py` | BT04 连接助手（**兼容壳**，实现已并入 `link_probe.py`，等价 `link_probe.py --wait <秒> --pair`）；发现后写 `tools/data/bt_port.txt` 供其它脚本使用 |
+| `link_regress.py` | **双链路真机回归**（`doc/双链路仲裁设计文档.md` §8 常跑项）：A 段链路体检（PING / ITEL / ODOM 20Hz / 突发零丢）+ T1/T2/T5/T7（双链路应答、owner 三语义、`BUSY` 门控、备链 STOP）；**自动取指挥权并在收尾还原**（避免"命令被 BUSY 拒绝"被误读成故障）。`--usb-only` 可只跑 A 段（当前 13/13 PASS） |
 | `flash_flow.py` | 烧录流程自动化：`--flash` 编译+烧录+提示拔插 USB+**自动等端口重现**+`PING` 验证+报 owner；`--verify` 事后复核 |
 | `bt_cmd_test.py` | 交互式命令台 / 自动回归（`--ping` / `--auto` / `--bin`） |
 | `step_capture.py` | 采集阶跃 CSV → `tools/data/*.csv` |

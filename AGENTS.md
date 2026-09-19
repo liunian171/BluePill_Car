@@ -80,6 +80,7 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Release/BluePill_Car.elf 0x0800000
 - IMU 欧拉角 / 编码器 / PID 等周期数据**默认只刷 OLED（页 0-7）**；开 `ODOM 1` 后欧拉角经 ATT 帧上串口
 - **命令看门狗 `WD <ms>`**（默认关）：超时无下行字节自动急停——上位机断链兜底（PDF 安全机制条款），ROS 对接时建议 500ms
 - 真机串口端口：**USB CDC 主链**（0483:5740，虚拟 COM，烧录后需拔插一次 USB → 用 `tools/flash_flow.py`）+ **BT04 SPP 备链**（9600-8N1；**端口号随配对变化**：历史实测 COM15→COM14→COM12，MCU 复位后 SPP 实例可能消失需等重连）。**两条链路一起发现**：`python tools/link_probe.py`（归类 + 逐口隔离探测 + 报 owner，结果存档 `tools/data/link_probe.txt`；BT04 应答时另写 `tools/data/bt_port.txt`）。旧入口 `tools/bt_connect.py <秒数>` 保留为兼容壳
+- **改完固件后的真机回归（一条命令）**：`python tools/link_regress.py` —— A 段链路体检（PING / ITEL 有数+200ms 节拍 / ODOM 20Hz + ATT 10Hz / 突发 40 条零丢）+ T1/T2/T5/T7 指挥权用例；**工具会自动取指挥权并在收尾还原**（非 owner 链路的命令会被 `BUSY:<owner>` 拒绝，别把门控当故障）。当前基线 13/13 PASS
 
 ## 四、工程架构现状
 
