@@ -50,11 +50,17 @@
 cmake --preset Release
 # 编译（⚠️ 必须用 Release：Debug(-O0) 体积 99%+ 放不下 64KB，flash.bat 自 2026-09-09 起固定 Release）
 cmake --build build/Release
-# 编译+烧录 一键（SWD, 烧完自动复位）
-.\flash.bat
-# 仅烧录
+# 编译+烧录+**自动等拔插+自动验证** 一条命令（推荐；原因见下）
+python tools/flash_flow.py --flash         # --verify 供"已拔插"后单独复核
+# 或仅烧录（⚠️ 烧完需人工拔插一次 USB，否则主机报错误 31/43）
 STM32_Programmer_CLI.exe -c port=SWD -w build/Release/BluePill_Car.elf 0x08000000 -rst
 ```
+
+**为什么烧完要拔插（2026-09-19 结论）**: F103 **软复位后 USB 不重枚举** —— 主机保留旧设备节点，
+打开串口报错误 31/43。**固件侧制造"拔出"事件的尝试已证伪**（boot 前保持 USB 断电态 250ms 无效，
+推断本板 DP 的 1.5k 上拉为外部固定）→ 只能靠物理拔插（总线复位）。
+**对策 = 流程自动化**：`tools/flash_flow.py` 把"烧录 → 提示拔插 → 轮询等端口重现 → `PING` 验证"
+串成一条命令（可后台跑，完成即回报），省掉每次联调的人机来回确认。根治需硬件侧（DP 上拉改 GPIO 控制）。详调试总结 §27。
 
 **占用与瘦身（2026-09-19 批次）**: 当前 **Flash 55096B / 84.07%、RAM 11832B / 57.77%**（批次前 95.28% —— 逼近 64KB 上限，已解除）。
 本批落地：紧凑 `sinf/cosf`（`common/math_fast.c`，−4.4KB）+ 删 I2C2 事件中断（−2.9KB）。
