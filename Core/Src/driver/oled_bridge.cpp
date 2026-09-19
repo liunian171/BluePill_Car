@@ -20,15 +20,8 @@ bridge_ret_t oled_bridge_init(const oled_cfg_t *cfg)
     return BRIDGE_OK;
 }
 
-void oled_bridge_show_string(uint8_t row, uint8_t col, const char *str)
-{
-    g_oled.show_string(row, col, str);
-}
-
-void oled_bridge_show_chinese(uint8_t row, uint8_t col, uint8_t index)
-{
-    g_oled.show_chinese(row, col, index);
-}
+/* [Flash 瘦身 2026-09-19] oled_bridge_show_string(8×16) / oled_bridge_show_chinese
+ * 已删除：无调用者 + 携带 1.5KB 字库（详 oled_driver.cpp 同批说明与代码风格指南 §7） */
 
 void oled_bridge_show_string_small(uint8_t page, uint8_t col, const char *str)
 {

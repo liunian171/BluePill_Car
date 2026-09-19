@@ -101,7 +101,15 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* i2cHandle)
     HAL_NVIC_SetPriority(I2C2_EV_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(I2C2_EV_IRQn);
   /* USER CODE BEGIN I2C2_MspInit 1 */
-
+    /* [Flash 瘦身 2026-09-19] 立即关回去：本工程 I2C 全走**阻塞式** HAL_I2C_Mem_Read/Write
+     * （超时 10ms/20ms），从不开启任何 I2C 中断源（NEIE/TCIE 等），NVIC 使能纯属
+     * CubeMX 默认产物。关掉它有两个作用：
+     *   ① 语义正确（无中断使用者就别开中断）；
+     *   ② 与 it.c 的 I2C2_EV_IRQHandler 瘦身配套 —— 避免"处理器被删而中断仍使能"
+     *      的隐患（若将来有人启用 I2C IT 传输，必须同步恢复两处）。
+     * ⚠️ 本行在 USER CODE 区，CubeMX regen 不会吞掉；但 regen 会把上两行的
+     *    HAL_NVIC_EnableIRQ 重新生成（见 it.c 同批说明）。 */
+    HAL_NVIC_DisableIRQ(I2C2_EV_IRQn);
   /* USER CODE END I2C2_MspInit 1 */
   }
 }

@@ -98,57 +98,14 @@ void OledDriver::clear() {
 }
 
 /* ==========================================================================
- *  ASCII 8×16 字符显示
- *
- *  每个字符 16 字节:
- *     [0..7]  = 上半部分 (8 列)
- *     [8..15] = 下半部分 (8 列)
- *
- *  row(0~3) 对应:
- *     上 page = row * 2
- *     下 page = row * 2 + 1
+ *  [Flash 瘦身 2026-09-19] 本处原有 "ASCII 8×16 显示 show_string()" 与
+ *  "16×16 汉字显示 show_chinese()" 两个接口（上游 F427 工程遗留）。
+ *  本车自始至终只用 6×8 整行刷新（show_line_small）→ 二者**无任何调用者**，
+ *  却把 8×16 字库（95 字 × 16B ≈ 1.5KB）+ 汉字库常驻 Flash。
+ *  判定依据 = 代码风格指南 §7（死代码三判据：无调用者 / 无契约义务 / 有替代路径），
+ *  处置 = 整块删除（含 oled_font_data.c），git 历史可完整找回。
+ *  恢复方式：从 git 取回 oled_font_data.c + 本节代码 + 两处声明，并重新 cmake configure。
  * ========================================================================== */
-
-void OledDriver::show_string(uint8_t row, uint8_t col, const char *str) {
-    if (row > 3 || !str) return;
-
-    while (*str && col < 16) {
-        uint8_t idx = (uint8_t)(*str) - 0x20;
-        if (idx > 94) { str++; continue; }
-
-        uint8_t byte_col = col * 8;   // 每个字符 8 列像素
-
-        /* ---- 上半（row × 2）---- */
-        set_pos(row * 2, byte_col);
-        write(0x40, OLED_F8x16[idx], 8);           // 前 8 字节
-
-        /* ---- 下半（row × 2 + 1）---- */
-        set_pos(row * 2 + 1, byte_col);
-        write(0x40, OLED_F8x16[idx] + 8, 8);       // 后 8 字节
-
-        col++;
-        str++;
-    }
-}
-
-/* ==========================================================================
- *  16×16 汉字显示 — 占用两行 (上+下)
- * ========================================================================== */
-
-void OledDriver::show_chinese(uint8_t row, uint8_t col, uint8_t index) {
-    if (row > 2 || col > 14) return;  // col 在 ASCII 8 像素单位下
-    if (index > 1) return;
-
-    uint8_t byte_col = col * 8;  // 汉字宽 16 像素 = 2 个 ASCII 列
-
-    /* 上半：row */
-    set_pos(row * 2, byte_col);
-    write(0x40, font_cn_16x16[index], 16);         // 前 16 字节
-
-    /* 下半：row + 1 */
-    set_pos(row * 2 + 1, byte_col);
-    write(0x40, font_cn_16x16[index] + 16, 16);    // 后 16 字节
-}
 
 /* ==========================================================================
  *  6×8 小字显示 — 每行 21 个字符

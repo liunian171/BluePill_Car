@@ -56,6 +56,11 @@ cmake --build build/Release
 STM32_Programmer_CLI.exe -c port=SWD -w build/Release/BluePill_Car.elf 0x08000000 -rst
 ```
 
+**占用与瘦身（2026-09-19 批次）**: Release 已启用 **LTO**（`-flto` 编译+链接，见 `cmake/gcc-arm-none-eabi.cmake`）；
+当前 **Flash 47596B / 72.62%、RAM 11808B / 57.66%**（批次前为 95.28% —— 逼近 64KB 上限，已解除）。
+**新增功能前先看这一行**；再紧时的下一步候选 = USB 描述符字符串精简（`usbd_desc.c` 2427B）/ `main.c` 格式化字符串 / 自定义精简 printf。
+⚠️ **CubeMX regen 会把 I2C2 事件中断生成回来**（`HAL_I2C_EV_IRQHandler` +2.9KB）→ regen 后复查 map/elf；启用 I2C 中断/DMA 时须同时恢复 `it.c` 调用与 `i2c.c` NVIC 使能（详见调试总结 §25）。
+
 **硬件在环两级模式**（沿用 SimpleCar 协议）：
 - **一级（优先）**: Agent 直驱——用户接线完毕告知 → Agent 执行 flash.bat 烧录 + 串口抓日志判读
 - **二级（兜底）**: 指令-回读——Agent 给完整命令行 + 预期现象清单，用户复制执行后回读输出
@@ -168,6 +173,8 @@ while(1):
 | 用 `UART2 Ready` 横幅判断 init 成功 | 横幅在桥 init **之前**发送 → 判据应为 `PING` 有 `PONG`（`Error_Handler()` 会 `__disable_irq()` 死循环 → 无应答） |
 | **蓝牙 SPP"连不上"三态**（2026-09-15，详调试总结 §19） | ① open 立即拒绝=口被僵尸进程占（测试脚本必带 `write_timeout`；工具静默死掉必查 `tasklist` python 残留并 `Stop-Process`）② open 阻塞 20s+=微软栈在建链（正常，调用超时给足 90s）③ 写超时=设备不可达（查板子供电/手机抢占单连接/设置里点"连接"）。BT04 找口：`Get-PnpDevice` InstanceId 匹配 MAC `98DA20045F4F`；配对 PIN `1234` |
 | ⚠️ **本机环境：对 `.git/` 的写入会被拦截/回滚** | 症状：`git fetch` 报 `[new branch]` 但跟踪引用不落地（`[gone]`）、`git update-ref` 返回成功却写不进、`rm` 删 1 个文件却删掉多个（曾一次清空 70 个）、**`git rm <单文件>` 留 stale `index.lock` + 连带删工作区 35 个无关源文件 + 丢未跟踪新文件**（2026-09-15 实锤）→ **对策**：① **本仓库禁用 `git rm`**——用普通 `rm <单文件>` + `git add` + 即时 `git status --short` 校验 ② 中招处置：`rm .git/index.lock` 清锁 → `git restore -- <目录>` 逐目录恢复 → 未跟踪新文件重写 ③ 跟踪引用失联时手工写 `.git/packed-refs`（标准格式，两行即可）④ 怀疑杀软实时防护监控了工作区 |
+| **map 瘦身统计把已剔除段算进来**（2026-09-19 瘦身批次） | 症状：按"目标文件"统计 Flash 时 hal_i2c 算出 13.8KB（真值 5.3KB）→ 结论整体跑偏。根因：ld 的 map 里有 **`Discarded input sections`** 块（`--gc-sections` 丢弃段全列在此）。**对策**：统计必须从 `Linker script and memory map` 行之后开始（awk 置 live 标志）；**并且"删死代码"前先用 `nm`/map 确认该符号真在固件里**——已被 gc 自动剔除的死代码删了收益为 0（8×16 字库即此例） |
+| **为通用精度付库代码**（2026-09-19） | 症状：只用 ≤2π 域的 `sinf/cosf` 链入 newlib 全范围规约链 4.1KB。**规避**：域窄时自实现紧凑版（`common/math_fast.c`，误差 4.8e-07），**并用 PC 桩对宿主 libm 逐点比对**证明够用；同类可推广到 printf/数学其它函数 |
 
 ## 六、文档索引
 

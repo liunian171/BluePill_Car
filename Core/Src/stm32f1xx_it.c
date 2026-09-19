@@ -265,9 +265,16 @@ void TIM1_CC_IRQHandler(void)
 void I2C2_EV_IRQHandler(void)
 {
   /* USER CODE BEGIN I2C2_EV_IRQn 0 */
-
+  /* [Flash 瘦身 2026-09-19] 本工程 I2C 全走**阻塞式**（HAL_I2C_Mem_Read/Write，10/20ms
+   * 超时），无任何 I2C 中断使用者 —— 故此处**不调用** HAL_I2C_EV_IRQHandler：
+   *   该 HAL 函数连同其专用的主/从 IT 完成子状态机在 map 中占 2228B+，
+   *   去掉引用后由 --gc-sections 整块回收（实测 Flash −2.2KB，详调试总结 §25）。
+   * 中断源已在 i2c.c 的 USER CODE 区关闭（HAL_NVIC_DisableIRQ(I2C2_EV_IRQn)）,
+   * 运行期本处理器不会被触发；保留空实现只为向量表引用完整。
+   * ⚠️ CubeMX regen 会将被删的调用行**重新生成**回来（Flash 回涨）→ regen 后复查
+   *    （判据：map/elf 中是否又出现 HAL_I2C_EV_IRQHandler）。
+   * ⚠️ 若将来启用 I2C 中断/DMA 传输，必须同时恢复：① 本调用 ② i2c.c 的 NVIC 使能。 */
   /* USER CODE END I2C2_EV_IRQn 0 */
-  HAL_I2C_EV_IRQHandler(&hi2c2);
   /* USER CODE BEGIN I2C2_EV_IRQn 1 */
 
   /* USER CODE END I2C2_EV_IRQn 1 */

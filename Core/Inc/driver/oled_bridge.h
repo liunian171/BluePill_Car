@@ -42,9 +42,9 @@ typedef struct {
  */
 bridge_ret_t oled_bridge_init(const oled_cfg_t *cfg);
 
-/* ---- 显示接口（单例，无 id）---- */
-void oled_bridge_show_string(uint8_t row, uint8_t col, const char *str);
-void oled_bridge_show_chinese(uint8_t row, uint8_t col, uint8_t index);
+/* ---- 显示接口（单例，无 id）----
+ * [Flash 瘦身 2026-09-19] 原 `oled_bridge_show_string`(8×16) / `oled_bridge_show_chinese`
+ * 已删除（无调用者 + 携带 1.5KB 字库）；本车显示统一走下方 6×8 两条路径。 */
 void oled_bridge_show_string_small(uint8_t page, uint8_t col, const char *str);
 void oled_bridge_show_line_small(uint8_t page, const char *str);   /* 整行单事务写入 */
 

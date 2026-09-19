@@ -43,20 +43,9 @@ public:
     /** @brief 清屏 */
     void clear();
 
-    /**
-     * @brief 显示 ASCII 字符串
-     * @param row  0~3 文本行
-     * @param col  0~15 字符列
-     */
-    void show_string(uint8_t row, uint8_t col, const char *str);
-
-    /**
-     * @brief 显示 16×16 汉字
-     * @param row      汉字上端所在行 (0~2)
-     * @param col      字符列 (0~7，汉字占 2 个 ASCII 字符宽度)
-     * @param index    字库索引 (CN_INDEX_LIU / CN_INDEX_NIAN)
-     */
-    void show_chinese(uint8_t row, uint8_t col, uint8_t index);
+    /* [Flash 瘦身 2026-09-19] 原 show_string(8×16) / show_chinese(16×16) 已删除 ——
+     * 无任何调用者（本车只用 6×8 整行刷新），却常驻 8×16 字库 ≈1.5KB。
+     * 需大字号时从 git 历史取回并重新 configure（判据见代码风格指南 §7）。 */
 
     /**
      * @brief 显示 6×8 小字字符串

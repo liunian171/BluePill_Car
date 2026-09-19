@@ -69,5 +69,13 @@ if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
 if ($LASTEXITCODE -ne 0) { $failed++ }
 
 Write-Host ""
+Write-Host "== 编译+运行: math_fast 通用算法层测试桩 (紧凑 sinf/cosf 精度) =="
+& $gcc -Wall -Wextra @incs -o build/pc_test_math_fast.exe `
+    test/host_math_fast_test.c Core/Src/common/math_fast.c -lm
+if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
+& build\pc_test_math_fast.exe
+if ($LASTEXITCODE -ne 0) { $failed++ }
+
+Write-Host ""
 if ($failed -eq 0) { Write-Host "== 全部测试桩通过 ==" } else { Write-Host "== 有 $failed 组测试失败 ==" }
 exit $failed
