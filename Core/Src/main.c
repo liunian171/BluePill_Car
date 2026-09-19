@@ -394,7 +394,10 @@ int main(void)
         Error_Handler();
 
     /* ---- 里程计感知组件 (ΔX/ΔY/Δθ 增量位姿, 上位机 ODOM 上报数据源) ----
-     * 依赖 imu_bridge 已 init（yaw 注入）。基准在主循环首拍由 update 自动建立。 */
+     * 依赖 imu_bridge 已 init（yaw 注入）。基准在主循环首拍由 update 自动建立。
+     * （C1 故障注入验证记录 2026-09-20：临时注入 bad cfg(wheel_circ_mm=0) →
+     *   ODOM_ERR_BAD_CFG → Error_Handler 停机，真机 4×PING 全程无 PONG——
+     *   "init 失败即停"实锤，详调试总结 §22。验证后已还原此行。） */
     if (odom_init(&g_odom_cfg, &g_odom_io) != ODOM_OK)
         Error_Handler();
     /* USER CODE END 2 */

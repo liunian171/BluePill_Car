@@ -4,3 +4,11 @@ mx.scratch
 __pycache__/
 *.pyc
 .workbuddy/
+# flash/debug debris
+flash_out*.txt
+flash_verify*.txt
+readback*.bin
+readback_out.txt
+rb.txt
+swd_probe.txt
+ports_dump.txt

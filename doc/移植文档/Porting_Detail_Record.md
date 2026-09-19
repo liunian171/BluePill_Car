@@ -111,7 +111,8 @@ imu_bridge_init(0, IMU_MPU6050, &g_i2c_dev);
 imu_bridge_init(0, IMU_MPU6050, &hi2c2);
 ```
 
-> **待补项**：应新建 `i2c_hardware_ops.c` 实现硬件 I2C 的 ops 表（`I2C_PlatformOps_t`），内部调 `HAL_I2C_Mem_Write/Read_IT`。上层代码恢复通过 `I2C_Handle + ops` 传入，保持 ops 抽象一致性。当前直接调 HAL 是临时方案。
+> ~~**待补项**：应新建 `i2c_hardware_ops.c` 实现硬件 I2C 的 ops 表（`I2C_PlatformOps_t`），内部调 `HAL_I2C_Mem_Write/Read_IT`。上层代码恢复通过 `I2C_Handle + ops` 传入，保持 ops 抽象一致性。当前直接调 HAL 是临时方案。~~
+> ✅ **已补齐（2026-09-13/15）**：`i2c_hardware_ops.c/.h` 已建成并被 main.c 引用；OLED 链另经 `oled_platform_ops.c` 走写事务注入，器件层零 HAL。
 
 ---
 

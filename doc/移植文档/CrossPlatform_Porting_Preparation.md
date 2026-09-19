@@ -26,6 +26,13 @@
 
 ## 二、当前代码中的隐藏平台依赖
 
+> **📌 2026-09-19 状态回写**（逐项对照当前代码）：
+> - **2.1 pwm.h include tim.h** → ✅ **已修复**（2026-09-11，pwm.h 现仅 include stdint）
+> - **2.3 / 2.4 uart_cmd_parser 与 handle_to_id** → ✅ **已随死代码清理删除**（2026-09-13，639 行批次）
+> - **2.6 无硬件 I2C ops** → ✅ **已解决**（`i2c_hardware_ops.c/.h` 已建成并被 main.c 引用；OLED 亦改写事务注入 `oled_platform_ops.c`，不再直调 HAL）
+> - **2.2 / 2.5 / 2.7** → 仍成立（平台文件本性如此，跨平台时按节重写）
+> - **§三 清单更新**：平台 ops 实现现有 **6 件**（pwm / uart / encoder / usergpio / useri2c / **oled_platform_ops**）+ i2c_hardware_ops；"I2C 硬件 ops 未写"一行已过时
+
 这些位置在当前 STM32 工程中能正常编译，但换到其他平台会直接报错。
 
 ### 2.1 `pwm.h:5` — 头文件中直接引用 `tim.h`

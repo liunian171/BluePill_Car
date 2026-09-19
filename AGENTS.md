@@ -20,8 +20,9 @@
 
 - **代码权威源**: 本仓库 `Core/`（CubeMX + CMake + Ninja 工程）——一手真相
 - **文档区**: `doc/`（架构/调试/巡线设计/移植，见 §六 索引）；`backup/` 为历史备份，只读
-- **状态（2026-09-15）**: 基础驱动链路全通（电机/编码器/IMU/OLED/串口/灰度）；**执行栈两侧组件已组件化**（`steering` 转向 ✅真机 / `speed_loop` 速度环 ✅真机）；**感知侧组件化推进中**（`odom` ✅ / `attitude` 姿态 ✅真机（C3，含 `common/imu_filter.c` 纯 C 移植）；巡线感知拆分待做）；**桥接层家族契约关键项真机通过**（`M1 30` 不发散 + SV 链回归，⬜ 剩故障注入）；**上位机对接批次落地并真机验证**（odom 组件 + ODOM/ATT 帧 + 看门狗 + 0x20，实转回归 14/14）；闭环调参工具链 + **IMU 调试工具链**（`ITEL/IGAIN/IDRIFT/IRATE/ICAL` + SOP）可用；**IMU-1 yaw 失真已修复**（漂移补偿陀螺门限，调试总结 §20）；巡线状态机已集成（实车整定未做）；上位机对接规范见 `README.md`
-- **下次开工第一件事**: **提速决策**（ODOM 50Hz 需 USART3/USART2 提速，动 `.ioc` 需用户拍板）+ **C1 故障注入**（P0 唯一未跑项）；当前进度与待办见 `doc/开发跟踪.md` §当前进行中
+- **状态（2026-09-20）**: 基础驱动链路全通（电机/编码器/IMU/OLED/串口/灰度）；**执行栈两侧组件已组件化**（`steering` 转向 ✅真机 / `speed_loop` 速度环 ✅真机）；**感知侧组件化推进中**（`odom` ✅ / `attitude` 姿态 ✅真机（C3，含 `common/imu_filter.c` 纯 C 移植）；巡线感知拆分待做）；**桥接层家族契约真机全部通过**（`M1 30` 不发散 + SV 链回归 + **故障注入"init 失败即停"已验 2026-09-20**，调试总结 §22）；**上位机对接批次落地并真机验证**（odom 组件 + ODOM/ATT 帧 + 看门狗 + 0x20，实转回归 14/14）；闭环调参工具链 + **IMU 调试工具链**（`ITEL/IGAIN/IDRIFT/IRATE/ICAL` + SOP）可用；**IMU-1 yaw 失真已修复**（漂移补偿陀螺门限，调试总结 §20）；**功能编译开关已落地**（`car_config.h`，巡线当前编译期剔除 ✅真机回归，详开发跟踪 3⑤）；巡线状态机已集成（实车整定未做）；上位机对接规范见 `README.md`
+- **运行模式（双模式定位，2026-09-19 记档）**: ① **ROS 下位机模式（主用）**——接收上位机命令（M/BRK/DUTY/0x20）+ 上行 ODOM/ATT 帧 + WD 断链急停；② **独立小车模式**——巡线状态机自治（**暂不使用，已编译期剔除**，恢复 = car_config.h 宏改 1 + 重新 cmake configure，见 `doc/开发跟踪.md` 设计决议 2026-09-19）。两模式切换点 = 组装层接管权仲裁
+- **下次开工第一件事**: **提速决策**（ODOM 50Hz 需 USART3/USART2 提速，动 `.ioc` 需用户拍板）；其次：舵机示波器/目视两个人眼项、`car_config.h` 标定集中（纯重构）；当前进度与待办见 `doc/开发跟踪.md` §当前进行中
 
 ## 二、硬件方案（全部已实测确认）
 
@@ -45,14 +46,14 @@
 工具链: STM32CubeCLT（ARM GCC / CMake / Ninja / CubeProgrammer），LN 机已验证。
 
 ```powershell
-# 配置（首次或改 CMakeLists 后）
-cmake --preset Debug
-# 编译
-cmake --build build/Debug
+# 配置（首次或改 CMakeLists / car_config.h 后；**功能开关改宏必须重新 configure**）
+cmake --preset Release
+# 编译（⚠️ 必须用 Release：Debug(-O0) 体积 99%+ 放不下 64KB，flash.bat 自 2026-09-09 起固定 Release）
+cmake --build build/Release
 # 编译+烧录 一键（SWD, 烧完自动复位）
 .\flash.bat
 # 仅烧录
-STM32_Programmer_CLI.exe -c port=SWD -w build/Debug/BluePill_Car.elf 0x08000000 -rst
+STM32_Programmer_CLI.exe -c port=SWD -w build/Release/BluePill_Car.elf 0x08000000 -rst
 ```
 
 **硬件在环两级模式**（沿用 SimpleCar 协议）：
@@ -63,7 +64,7 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Debug/BluePill_Car.elf 0x08000000 
   ④ **按需**（默认关）：调参遥测（`TEL/STEP/DUMP`）+ 上位机里程计帧（`ODOM 1` → 二进制 ODOM 0x51 @20Hz + ATT 0x52 @10Hz，格式见 README §3.8.1）
 - IMU 欧拉角 / 编码器 / PID 等周期数据**默认只刷 OLED（页 0-7）**；开 `ODOM 1` 后欧拉角经 ATT 帧上串口
 - **命令看门狗 `WD <ms>`**（默认关）：超时无下行字节自动急停——上位机断链兜底（PDF 安全机制条款），ROS 对接时建议 500ms
-- 真机串口端口：BT04 出 SPP 口（本机实测 **COM15**，9600-8N1；端口号会随配对变化，可用 `python -c "import serial.tools.list_ports as p;[print(x.device,x.description) for x in p.comports()]"` 查）
+- 真机串口端口：BT04 出 SPP 口（9600-8N1；**端口号随配对变化**：历史实测 COM15→COM14→COM12，MCU 复位后 SPP 实例可能消失需等重连——**以 `tools/bt_connect.py <秒数>` 自动探测为准**，结果存档 `tools/data/bt_port.txt`）
 
 ## 四、工程架构现状
 
@@ -86,6 +87,8 @@ Core/Src/common/     通用算法层: ringbuf / pid / imu_filter(滤波核心) /
 
 数据方向：感知链上行（裸数→物理量）→ 决策（物理量→意图）→ 执行链下行（意图→寄存器）；命令链与显示链经桥接层/组装层正交接入。
 
+- **组装层定位（脑干模型，2026-09-19）**: 大脑=上位机（任务/SLAM/定位）· 小脑=决策组件（行为反射）· 脊髓/前庭=执行/感知组件 · **脑干=组装层**（节拍/仲裁/安全/呈现，只裁决不思考）；新自主能力一律做成新决策组件，**永不往 main.c 加"脑力"**——权威声明见 `doc/代码风格与模块衔接指南.md` §1.2
+
 - **跨平台约定**: 策略层禁止 include HAL/CubeMX 头；平台依赖全部收敛到 `*_platform_ops.c`（详 pits 见 `doc/移植文档/CrossPlatform_Porting_Preparation.md`）
 - **C/C++ 边界**: `*_bridge.h` 提供 `extern "C"` 接口；C++ 对象一律 `placement new` + 静态池，**禁堆 new**（heap 仅 512B，分配失败静默返回 NULL → 硬错误，已踩坑）
 
@@ -98,8 +101,9 @@ while(1):
   每 50ms:  看门狗判定(WD 使能时) → line_follower_update(now, 意图缓冲) → 推给 speed_loop → speed_loop_update(now)
             → odom_update(now)（增量位姿；ODOM 1 时发 ODOM 0x51 + ATT 0x52 帧）
             （0 速 / 内轮停车 = 释放 PID + 物理刹停，语义在 speed_loop 组件内）
-  每 100ms: imu_bridge_update_filter(0, now) + 读编码器 + OLED **单页轮转**（8 页 800ms 一轮）
-            （2026-09-11 核实：无串口上报；遥测须按需开启，见 README.md §3.5/§3.8.1）
+  每 100ms: 读编码器 + OLED **单页轮转**（8 页 800ms 一轮）
+            （IMU 滤波为**独立节拍 ③b**：周期 `g_imu_period_ms` 由 IRATE 命令可调 20~1000ms，默认 100ms，
+            并按 ITEL 模式携带 IMU 遥测；2026-09-15 IMU 工具链落地后不再与显示块绑定）
 ```
 
 ### 4.3 巡线状态机（详见 doc/巡线逻辑设计文档.md，唯一权威）
@@ -137,7 +141,7 @@ while(1):
 ### 5.4 条目完成闭环（每完成一个条目立即执行，不攒到收尾）
 
 ```
-1. 更新 doc/开发跟踪.md（条目状态 + 验证证据）    ← 尚未建立，首个开发条目时创建
+1. 更新 doc/开发跟踪.md（条目状态 + 验证证据）
 2. 记录 doc/调试总结.md（现象 → 根因 → 解决）     ← 成功验证也记（现象=验证内容，解决=实测数据）
 3. 更新 TODO 勾选 + 当前进行中区
 4. 本地 git commit（信息写明模块与验证状态；本地优先，远端推送可选）
@@ -190,11 +194,13 @@ while(1):
 ## 七、当前待办 / 待标定
 
 **功能/标定**
+- [x] `car_config.h` 功能编译开关 ✅ **2026-09-19 落地**（空壳替换方案 B；Release 双态 52612B↔50592B，巡线当前剔除态，详 `doc/开发跟踪.md` 设计决议 ④'）
+- [ ] 感知协助执行（后续目标，2026-09-19 登记）：感知层输出参与下位机运动控制（航向保持/打滑补偿类）——当前 odom/attitude 产物只上行上位机，内部无感知→运动联动路径；等 ROS 对接稳定后定序
 - [ ] 电机速度系数标定（转一圈 + 走一米闭环验证；PPR/周长/max_rpm 已实测）
-- [ ] PWM_SET_DUTY 命令实现（协议已定义 0x20）
+- [x] PWM_SET_DUTY 命令实现 ✅ main.c 二进制 0x20 已实现（限幅 ±100、真机回归过，见开发跟踪 R-2）
 - [ ] 巡线 PD 参数 + 三层阻尼实车整定（GK/GD/GS 在线调）
 - [ ] 直角弯/SEARCH 状态机实车验证（PC 逻辑推演过，真机未验）
-- [x] 帧接收超时重同步（`main.c:454`，100ms 无新字节丢弃半帧）✅ 已实现
+- [x] 帧接收超时重同步（100ms 无新字节丢弃半帧，main.c 帧解析段）✅ 已实现
 - [ ] 帧加 CRC 校验（低优先级）
 
 **当前主线（2026-09-13 定序：先"数据可信 + 看得见"，再动结构）**
@@ -224,7 +230,7 @@ while(1):
       验证：CMake 重配置 + 编译通过（Flash 44636B/RAM 5784B，主要来自工具链新功能；**死代码本就被 `--gc-sections` 剔除，故删它不省 Flash，省的是认知成本**）；PC 桩回归 txt_cmd 77/77 + steering 33/33
       判定与纪律已固化：`doc/代码风格与模块衔接指南.md` §7（死代码 vs 预留代码的区分、三条判据、删除纪律）
 - [ ] 有意预留项加显式标注（**勿删**）：`useri2c.c/.h`+`useri2c_ops.c/.h`（软 I2C，本工程用硬件 I2C2）、`pwm.h` 的 `PWM_Ch_State`/`Ch_State`/`TIM_PWM_g_Param`
-- [ ] `main.c` 的 `firewater_send()`（20 行）**保留但属"预留未启用"**：遥测实际走 10Hz CSV（`g_tel_on`），该 FireWater 二进制帧至今零调用；**启用条件**=需 >10Hz 带宽或 VOFA+ 波形时启用，**否则按死代码删除**（判据见指南 §7）
+- [x] `firewater_send()` 已删除 ✅（2026-09-14 死代码清理批次落定"二选一=删"；VOFA+ 波形需求由 ITEL 模式 2 承担，main.c IMU 节拍内联实现）
 
 **闭环参与**（⬇️ 已降级：用户 2026-09-11 决定巡线暂不使用、结构保留）
 - [ ] `steering` 接入巡线 `corr → 转向`（**非当前路径**）；`steering` 目前维持"命令驱动的舵机"

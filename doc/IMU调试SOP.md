@@ -83,14 +83,16 @@ E4  看快甩 gz 原始值      → 量程饱和（贴 ±250°/s 即中招）
 
 ### B. 算法参数（编译期；前四项为 IMU-1 实锤标定，复现新症状前不动）
 
+> 🔧 2026-09-19 位置更新：C3 搬迁后（2026-09-15）原 imu_bridge.cpp 宏已不存在，算法参数移至 **attitude.c 的 cfg 默认值**（ATT_DEF_*，可经 attitude_cfg_t 注入覆盖）；滤波核心在 common/imu_filter.c。数值不变。
+
 | 参数 | 位置 | 当前值 | 说明 |
 |------|------|--------|------|
-| 漂移跟踪陀螺门限 | imu_bridge.cpp `IMU_DRIFT_GYRO_GATE` | 1.5°/s | 防旋转误吸（IMU-1 修复核心） |
-| 静止判据阈值 | imu_bridge.cpp | ±0.05g | 宽→颠簸误判静止；窄→丢补偿窗口 |
-| 漂移跟踪速率 | imu_bridge.cpp | 0.02→0.05 | 静置吸收温漂的快慢（τ≈2s） |
-| 启动校准采样数 | imu_bridge.cpp `IMU_CAL_SAMPLES` | 50（5s） | 减小→上电快但零偏噪声大 |
-| dt 钳位 | imu_bridge.cpp | 1ms / 1s 上下限 | 断点恢复保护，不动 |
-| accel 运动分级 | imu_filter.cpp | 0 / 0.3 / 1.0 三档 | 剧烈运动降加速度计权重 |
+| 漂移跟踪陀螺门限 | attitude.c `ATT_DEF_GYRO_GATE` | 1.5°/s | 防旋转误吸（IMU-1 修复核心） |
+| 静止判据阈值 | attitude.c `ATT_DEF_ACCEL_TOL` | ±0.05g | 宽→颠簸误判静止；窄→丢补偿窗口 |
+| 漂移跟踪速率 | attitude.c `ATT_DEF_RATE_SLOW/_FAST` | 0.02→0.05 | 静置吸收温漂的快慢（τ≈2s） |
+| 启动校准采样数 | attitude.c `ATT_DEF_CAL_SAMPLES` | 50（5s） | 减小→上电快但零偏噪声大 |
+| dt 钳位 | attitude.c | 1ms / 1s 上下限 | 断点恢复保护，不动 |
+| accel 运动分级 | imu_filter.c | 0 / 0.3 / 1.0 三档 | 剧烈运动降加速度计权重 |
 
 ### C. 器件层配置（mpu6050.cpp 参数表；量程与 scale 查表联动）
 

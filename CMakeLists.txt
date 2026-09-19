@@ -50,6 +50,29 @@ file(GLOB USER_SOURCES
     Core/Src/common/*.cpp
 )
 
+# ---- 功能编译开关（单一真值源 = Core/Inc/car_config.h，详开发跟踪 2026-09-19 设计决议）----
+# 空壳替换方案：按宏取舍 line_follower.c / line_follower_stub.c，组装层 main.c 零修改。
+# 注意：改宏后必须重新 cmake configure（本段在 configure 期执行），只 build 不生效。
+set(CAR_CFG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/car_config.h")
+set(CAR_FEATURE_LINE_FOLLOWER 1)   # 解析失败时的兜底默认（= 保留功能，安全侧）
+if(EXISTS ${CAR_CFG_FILE})
+    file(STRINGS ${CAR_CFG_FILE} _car_lf_line REGEX "^[ \t]*#define[ \t]+CAR_FEATURE_LINE_FOLLOWER[ \t]+[01]")
+    if(_car_lf_line)
+        string(REGEX REPLACE ".*CAR_FEATURE_LINE_FOLLOWER[ \t]+([01]).*" "\\1" _car_lf_val "${_car_lf_line}")
+        set(CAR_FEATURE_LINE_FOLLOWER ${_car_lf_val})
+    endif()
+endif()
+message(STATUS "car_config: CAR_FEATURE_LINE_FOLLOWER = ${CAR_FEATURE_LINE_FOLLOWER}")
+
+list(FILTER USER_SOURCES EXCLUDE REGEX "line_follower(_stub)?\\.c$")
+if(CAR_FEATURE_LINE_FOLLOWER)
+    list(APPEND USER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/driver/line_follower.c")
+    message(STATUS "car_config: line follower -> FULL implementation (line_follower.c)")
+else()
+    list(APPEND USER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/driver/line_follower_stub.c")
+    message(STATUS "car_config: line follower -> STUB (feature compiled out)")
+endif()
+
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${USER_SOURCES})
 
 # Add include paths
