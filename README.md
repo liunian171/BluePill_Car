@@ -44,7 +44,7 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Release/BluePill_Car.elf 0x0800000
 
 > 务必用 **Release**（Debug `-O0` 会超出 64 KB Flash）。注意 CMake 用 GLOB 收集源文件，
 > **新增 `.c/.cpp` 后要重新执行一次 configure**，否则链接会报 undefined reference。
-> Release 已启用 **LTO**（链接期优化，2026-09-19 瘦身批次 −7.5KB）：当前占用 **Flash 47596B / 72.62%**。
+> 2026-09-19 瘦身批次后当前占用 **Flash 55096B / 84.07%**（`-flto` 试用因真机 HardFault 已回退，详 `doc/调试总结.md` §25）。
 
 PC 侧单元测试桩（无需硬件）：
 

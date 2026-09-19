@@ -56,10 +56,13 @@ cmake --build build/Release
 STM32_Programmer_CLI.exe -c port=SWD -w build/Release/BluePill_Car.elf 0x08000000 -rst
 ```
 
-**占用与瘦身（2026-09-19 批次）**: Release 已启用 **LTO**（`-flto` 编译+链接，见 `cmake/gcc-arm-none-eabi.cmake`）；
-当前 **Flash 47596B / 72.62%、RAM 11808B / 57.66%**（批次前为 95.28% —— 逼近 64KB 上限，已解除）。
-**新增功能前先看这一行**；再紧时的下一步候选 = USB 描述符字符串精简（`usbd_desc.c` 2427B）/ `main.c` 格式化字符串 / 自定义精简 printf。
+**占用与瘦身（2026-09-19 批次）**: 当前 **Flash 55096B / 84.07%、RAM 11832B / 57.77%**（批次前 95.28% —— 逼近 64KB 上限，已解除）。
+本批落地：紧凑 `sinf/cosf`（`common/math_fast.c`，−4.4KB）+ 删 I2C2 事件中断（−2.9KB）。
+⚠️ **LTO 已试用并回退**：`-flto` 能再省 7.5KB，但真机启动后 HardFault 锁死（`HFSR FORCED`/`CFSR IACCVIOL`、`uwTick` 冻结）→ **暂不启用**，后续专项 bisect（详调试总结 §25）。
+再紧时的下一步候选 = USB 描述符字符串精简（`usbd_desc.c` 2427B）/ `main.c` 格式化字符串 / 自定义精简 printf。
 ⚠️ **CubeMX regen 会把 I2C2 事件中断生成回来**（`HAL_I2C_EV_IRQHandler` +2.9KB）→ regen 后复查 map/elf；启用 I2C 中断/DMA 时须同时恢复 `it.c` 调用与 `i2c.c` NVIC 使能（详见调试总结 §25）。
+
+**SWD 判活三板斧（无串口时定位固件状态）**: ① `nm` 现取 `uwTick` 地址 → `HotPlug -r <addr> 4` 连读两次，冻结即停摆（**换构建/LTO 后地址会变，必须现取**）；② 读 `0xE000ED28`(CFSR)/`0xE000ED2C`(HFSR) 区分 HardFault 与 `Error_Handler`；③ 扫全 RAM 找异常栈帧（找不到帧 = 栈/PC 已损坏锁死）。⚠️ 一律 `mode=HotPlug`（默认模式复位 MCU 并打死 USB）。
 
 **硬件在环两级模式**（沿用 SimpleCar 协议）：
 - **一级（优先）**: Agent 直驱——用户接线完毕告知 → Agent 执行 flash.bat 烧录 + 串口抓日志判读
