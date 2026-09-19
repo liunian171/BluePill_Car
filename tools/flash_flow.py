@@ -24,6 +24,12 @@ import subprocess
 import sys
 import time
 
+# 输出统一 UTF-8：默认在 Windows 下走控制台代码页(GBK)，经管道/日志重定向后会变乱码
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import serial
 import serial.tools.list_ports
 
