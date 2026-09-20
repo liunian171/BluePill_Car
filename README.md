@@ -54,7 +54,7 @@ STM32_Programmer_CLI.exe -c port=SWD -w build/Release/BluePill_Car.elf 0x0800000
 | `CAR_FEATURE_USB` | 1 | USB 链路接线整体下线（ringbuf 不消费 / 判活恒假 / 仲裁固定 UART） |
 | `CAR_FEATURE_UART` | 1 | UART 链路接线整体下线（不开中断接收 / 发送 no-op / 平台 ops 换空壳） |
 
-> 三个宏**只允许**作用于 CMake 源文件列表与组装层 `main.c` 接线；组件层/桥接层禁止 include。
+> 三个宏**只允许**作用于 CMake 源文件列表与组装层接线（`main.c` 链路开关门控 + `app_wiring.c` 装配配置）；组件层/桥接层/其余 app_* 模块禁止 include。
 > 链路双 0 会被 CMake 直接拒绝。四组合验证脚本：`bash tools/car_cfg_matrix.sh`。
 
 **整车标定表**（同一文件的 `§整车标定` 段，2026-09-19 集中）：PPR / 编码器计数模值 / 轮周长 / 轮半径 / 轮距 /
@@ -460,7 +460,8 @@ print(ser.readline())        # b'M0:60RPM\r\n'
 ```
 Core/Inc/driver/  Core/Src/driver/   驱动与组件（桥接 / 组件 / 执行对象 / 器件 / 驱动各层）
 Core/Src/common/                     通用算法层（ringbuf / pid / imu_filter / tool）
-Core/Src/main.c                      组装层：实例创建 + 节拍接线 + 接管权仲裁 + 显示组版
+Core/Inc/app/  Core/Src/app/         组装层 app_* 宿主（app_wiring 装配 / app_link 命令链 / app_control 控制 / app_display 显示 / app_tx 发送）
+Core/Src/main.c                      装载层：CubeMX init + UART bring-up + ISR 壳 + 主循环喂时间
 test/                                PC 单元测试桩（gcc 直接编译，无需硬件）
 tools/                               上位机 Python 工具 + 实测数据
 doc/                                 设计与调试文档（索引见 AGENTS.md §六）
