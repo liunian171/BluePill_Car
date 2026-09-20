@@ -19,7 +19,8 @@
 #include "car_config.h"          /* 组装层配置单: 功能/链路编译开关 (铁律: 仅组装层+CMake 可 include) */
 #include "usbd_cdc_if.h"
 #include "driver/link_arbiter.h"
-#include "app/app_tx.h"                /* 发送出口/路由/编号换算 (2026-09-20 拆分) */
+#include "app/app_tx.h"
+#include "app/app_control.h"          /* 50ms 控制节拍宿主 (2026-09-20 拆分) */                /* 发送出口/路由/编号换算 (2026-09-20 拆分) */
 #include "driver/pwm.h"
 #include "driver/uart.h"
 #include "driver/uart_platform_ops.h"
@@ -180,62 +181,12 @@ static speed_loop_cfg_t g_spd_cfg = {
     }
 };
 
-/* ==== 决策组件的输出缓冲（巡线写意图 → 组装层推给执行组件）====
- * 与执行组件解耦：巡线仍按"目标幅值 + 方向"两数组接口输出（结构保留不动），
- * 组装层负责合成带符号目标；巡线未启用时该缓冲不参与（命令下发的意图保持不变）。 */
-static float        g_lf_tgt[2]     = {0.0f, 0.0f};
-static int8_t       g_lf_dir[2]     = {0, 0};
-
 static char         s_last_cmd[20]  = "NONE";  /* 最近执行的命令 (OLED 页6 显示) */static char         s_last_resp[20] = "-";     /* 最近应答/回复 (OLED 页4 显示) */
 
-/* ==== 调参工具链 (工程支持层, 可开关, 默认关 — STOP 急停自动关闭) ==== */
-static uint8_t      g_step_active   = 0;       /* 开环阶跃测试进行中 (激活时独占 50ms 控制帧) */
-static uint8_t      g_step_m        = 0;       /* 测试电机 id */
-static int16_t      g_step_rate     = 0;       /* 阶跃千分比 (±1000) */
-static uint32_t     g_step_t0       = 0;       /* 阶跃起始 tick (遥测 t 基准) */
-static uint32_t     g_step_end      = 0;       /* 阶跃结束 tick */
-static uint8_t      g_step_first    = 1;       /* 首帧测速基准初始化标志 (建基准并丢弃该帧) */
-/* 注: 阶跃测速基准/前馈系数已归位到 speed_loop 组件（原 g_step_prev_enc/tick、g_ff_gain）*/
-
-/* 机内记录: 20Hz 写 RAM, DUMP 重放 — 对抗无线链路丢行 (丢行可重试补全) */
-#define REC_MAX 128
-static uint8_t      g_rec_on        = 0;
-static uint16_t     g_rec_cnt       = 0;
-static uint32_t     rec_tick[REC_MAX];
-static int16_t      rec_t0[REC_MAX], rec_r0[REC_MAX];
-static int16_t      rec_t1[REC_MAX], rec_r1[REC_MAX];
-static uint8_t      g_step_div      = 1;       /* 遥测分频: 1=20Hz 2=10Hz (弱链路降频防丢行) */
-static uint8_t      g_step_cnt      = 0;       /* 遥测分频计数 */
-static uint8_t      g_tel_on        = 0;       /* 闭环遥测开关 (10Hz CSV, 阻塞发送, 仅整定会话开启) */
-static uint8_t      g_tel_div       = 0;       /* 50ms→100ms 分频 */
-
-/* ==== IMU 调试工具链 (2026-09-15, 照调参工具链模式: 可开关, 默认关; ITEL 随 STOP 关) ====
- * 背景: IMU-1 yaw 失真专案 (转 90° 只跟 ~20° 且回落) — 首嫌疑 = 漂移补偿把旋转误当零偏
- * (PC 仿真证实机理, tools/imu_sim_verify.py + doc/IMU调试工具链规划.md §3)。
- * ITEL 行 (模式1 CSV): tick,gx10,gy10,gz10(°/s×10),roll10,pitch10,yaw10(°×10),stable,driftz100
- * ITEL 行 (模式2 VOFA+ FireWater): gx,gy,gz(°/s),roll,pitch,yaw(°),driftz(°/s) 两位小数,
- *   7 通道真实物理量 — VOFA+ 选 FireWater 协议直接出曲线, 免换算 (逗号分隔+换行即其格式)
- * 带宽: 两模式 ~40-45B/行 @5Hz ≈ 225B/s (23%@9600) — 弱链路可用; IRATE 50 时 10Hz 需注意;
- *   模式 1/2 二选一 (同时开会双份流量) */
-static uint8_t      g_itel_mode     = 0;       /* 0关/1=CSV(PC工具)/2=VOFA+ FireWater */
-static uint8_t      g_itel_div      = 0;       /* 更新节拍 2 分频 (默认 5Hz) */
-static uint16_t     g_imu_period_ms = CAR_IMU_PERIOD_MS;  /* IMU 更新周期 (IRATE 20~1000 可在线改) */
-static uint32_t     t_imu           = 0;       /* IMU 更新节拍基准 */
-
-/* ==== 上位机对接 (2026-09-14): 里程计上报 + 命令看门狗 ====
- * 上行二进制帧 (复用 0xAA...FFFF 帧体系, 无校验 — 需求方确认只要增量+时间戳):
- *   ODOM 0x51: 帧头|ΔX|ΔY|Δθ|ts_ms|FFFF = 20B @20Hz (50ms, 与控制环同拍)
- *   ATT  0x52: 帧头|roll|pitch|yaw|ts_ms|FFFF = 20B @10Hz
- * 带宽: 全开 ≈ 600B/s ≈ 62%@9600 — 仅对接会话开启; 20ms 周期(50Hz)需先提速(见 README §3.9) */
-#define ODOM_FRAME_CMD   0x51
-#define ATT_FRAME_CMD    0x52
-static uint8_t      g_odom_on       = 0;       /* 里程计上报开关 (ODOM 命令 / STOP 关闭) */
-static uint8_t      g_att_div       = 0;       /* ATT 10Hz 分频 */
-
-/* 命令看门狗: WD <ms> 使能; 超时无任何下行字节 → 急停 (上位机断链兜底, PDF 安全机制条款) */
-static uint32_t     g_wd_ms         = 0;       /* 0 = 关 (默认, 保持现有人机行为) */
+/* ==== [app_control 拆分 2026-09-20] 调参/IMU 工具链/上位机上报/WD 的状态与
+ * 50ms 执行体已迁往 Core/Src/app/app_control.c —— 本文件仅保留:
+ *   g_last_rx_tick (owner 链最近下行字节, 消费循环写入, 经 io 读出喂 WD) ==== */
 static uint32_t     g_last_rx_tick  = 0;       /* 最近下行字节时刻 (主循环每字节刷新) */
-static uint8_t      g_wd_fired      = 0;       /* 触发闩锁: 防止超时期间反复急停刷屏 */
 
 /* ==== 里程计感知组件 (odom) 的标定表 + IO 绑定 — 车知识集中注入 ====
  * 数值真值源 = car_config.h「整车标定表」（2026-09-19 标定集中） */
@@ -317,10 +268,11 @@ static void link_owner_tx(const char *buf, int n)
     app_tx_send_to_owner(buf, n);
 }
 
-/* [P2 双链路仲裁] 调参会话激活判据 (会话锁注入, 设计文档 §2.3) */
+/* [P2 双链路仲裁] 调参会话激活判据 (会话锁注入, 设计文档 §2.3)
+ * [app_control 拆分] 状态收编后判据本体在 app_control_session_active() */
 static uint8_t arb_session_active(void)
 {
-    return (g_step_active || g_tel_on || g_rec_on || g_odom_on || g_itel_mode) ? 1u : 0u;
+    return app_control_session_active();
 }
 
 /* [P2 双链路仲裁] 广播出口注入 */
@@ -334,6 +286,27 @@ static uint8_t owner_main_link(void)
 {
     return app_tx_owner_main_link();
 }
+
+/* ==== [app_control 拆分] io 绑定 (组装层职责: 把宿主接到 HAL/显示/发送) ==== */
+static void tx_raw(const char *buf, int n);      /* 定义于下方助手区 (前向声明) */
+static void cmd_note(const char *fmt, ...);
+static void ack(const char *fmt, ...);
+static uint8_t ctl_usb_alive(void *ctx)
+{
+    (void)ctx;
+    return (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
+            hUsbDeviceFS.pClassData != NULL && g_usb_dtr) ? 1u : 0u;
+}
+static uint32_t ctl_last_rx_tick(void *ctx) { (void)ctx; return g_last_rx_tick; }
+static int32_t  ctl_enc_count(uint8_t id, void *ctx)
+{
+    (void)ctx;
+    return (id == 0) ? encoder_get_count(&henc1) : encoder_get_count(&henc2);
+}
+static void ctl_send_line(const char *s, void *ctx) { (void)ctx; tx_raw(s, (int)strlen(s)); }
+static void ctl_note_cmd(const char *s, void *ctx)  { (void)ctx; cmd_note("%s", s); }
+static void ctl_resp(const char *s, void *ctx)      { (void)ctx; ack("%s", s); }
+static void ctl_delay_ms(uint32_t ms, void *ctx)    { (void)ctx; HAL_Delay(ms); }
 
 /* 裸发送: 不记录 OLED 应答页 (寻迹诊断等高频事件用) */
 static void tx_raw(const char *buf, int n)
@@ -374,16 +347,7 @@ static int dec1(float v)
     return (d > 9) ? 9 : d;
 }
 
-/* 两位小数浮点 → "-1.63" 形式 (禁 %f 的整数拆分; 返回写入字符数) — VOFA+ FireWater 用 */
-static int fmt_f2(char *out, int n, float v)
-{
-    int neg = (v < 0);
-    float a = neg ? -v : v;
-    int ip = (int)a;
-    int fp = (int)((a - (float)ip) * 100.0f + 0.5f);
-    if (fp >= 100) { ip += 1; fp -= 100; }
-    return snprintf(out, n, "%s%d.%02d", neg ? "-" : "", ip, fp);
-}
+/* [app_control 拆分] fmt_f2 已随 ITEL 遥测迁往 app_control.c (原实现原样保留) */
 
 /* ---- 转向执行组件 (steering) 配置 + 输出绑定 ----
  * 坐标系: 输出域绝对角(°) — 直行 = -90, 右满舵 = -115(下限), 左满舵 = -65(上限), 行程 ±25
@@ -504,6 +468,28 @@ int main(void)
         if (app_tx_init(&tx_cfg) != BRIDGE_OK) Error_Handler();
     }
 
+    /* ---- [app_control 拆分 2026-09-20] 50ms 控制节拍宿主: io 绑定注入 ---- */
+    {
+        app_control_cfg_t ctl_cfg = {
+            .ctrl_period_ms = CAR_CTRL_PERIOD_MS,
+            .rec_max        = 128,               /* 原 REC_MAX */
+            .imu_period_ms  = CAR_IMU_PERIOD_MS,
+            .both_links     = LINK_BOTH_ENABLED,
+            .wd_default_off = 1,                 /* WD 命令可开, 默认关 */
+        };
+        app_control_io_t ctl_io = {
+            .usb_alive    = ctl_usb_alive,
+            .last_rx_tick = ctl_last_rx_tick,
+            .enc_count    = ctl_enc_count,
+            .send_line    = ctl_send_line,
+            .note_cmd     = ctl_note_cmd,
+            .resp         = ctl_resp,
+            .delay_ms     = ctl_delay_ms,
+            .ctx          = NULL,
+        };
+        if (app_control_init(&ctl_cfg, &ctl_io) != BRIDGE_OK) Error_Handler();
+    }
+
     /* ---- [P2 双链路仲裁] 上电 usb_alive 初值 ----
      * 双链路: 未知(-1), 枚举异步完成, 由宽限期逻辑兜底 (超时不活 → 自动切 UART)
      * [P3] USB=0 → 直接判死(0) = 仲裁固定走 UART; UART=0 → 直接判活(1) = 固定走 USB。
@@ -596,7 +582,6 @@ int main(void)
   uint8_t  f_len[LINK_COUNT] = {0, 0};
   uint8_t  in_frame[LINK_COUNT] = {0, 0};
   uint32_t t_frame[LINK_COUNT] = {0, 0};
-  uint32_t t_pid = 0;
   uint32_t t_disp = 0;
 
   while (1)
@@ -619,7 +604,7 @@ int main(void)
             if (li == LINK_UART) { g_last_uart_rx_tick = HAL_GetTick(); g_uart_seen = 1; }
             if (li == owner_main_link()) {   /* [P2] WD 只盯 owner 链路 (设计文档 §6) */
                 g_last_rx_tick = HAL_GetTick();   /* 看门狗: owner 链路下行字节算"活" */
-                g_wd_fired = 0;                   /* 解除触发闩锁 (断链恢复即重新武装) */
+                app_control_wd_rearm();           /* 解除触发闩锁 (状态在 app_control) */
             }
             if (b == 0xAA && !in_frame[li]) { f_len[li] = 0; in_frame[li] = 1; t_frame[li] = HAL_GetTick(); }
             if (in_frame[li]) {
@@ -674,10 +659,9 @@ int main(void)
                         line_follower_enable(0);
                         line_follower_set_auto(0);
                         steering_center();  /* 前轮回直行位 (实测 -90, 非 0) */
-                        /* 调参工具链随急停关闭 (阶跃测试中途=安全终止, 遥测/记录回默认关) */
-                        g_step_active = 0; g_tel_on = 0; g_rec_on = 0;
-                        g_odom_on = 0;    /* 上位机对接上报同样关闭 (看门狗保持武装) */
-                        g_itel_mode = 0;  /* IMU 遥测同属调试通道, 一并关闭 */
+                        /* 调参工具链随急停关闭 (阶跃测试中途=安全终止, 遥测/记录回默认关)
+                         * [app_control 拆分] 状态收编后经 stop_all 一口关闭 (看门狗保持武装) */
+                        app_control_stop_all();
                         cmd_note("STOP ALL");
                         ack("STOP OK LINE OFF\r\n");
                         break;
@@ -814,30 +798,24 @@ int main(void)
                      * ② 开环输出经 motor_bridge_set_rate_0E3 直通(桥接层稳定边界), 千分比域
                      *   与 TB6612Protocol 一致, 换驱动芯片时仅桥内适配 */
                     case TXTCMD_STEP: {
-                        if (g_step_active) { ack("STEP BUSY\r\n"); cmd_note("STEP BUSY"); break; }
-                        if (tc.i0 < 0 || tc.i0 > 1 || tc.i1 < -1000 || tc.i1 > 1000 ||
-                            tc.i2 < 100 || tc.i2 > 5000 ||
-                            tc.i3 < 1 || tc.i3 > 4) { ack("STEP BAD\r\n"); cmd_note("STEP BAD"); break; }
-                        /* 台架安全前置: 关巡线+关自动, 双轮清目标+PID释放+物理刹停 */
-                        line_follower_enable(0);
-                        line_follower_set_auto(0);
-                        for (int i = 0; i < 2; i++) speed_loop_stop(i);
-                        g_step_m      = (uint8_t)tc.i0;
-                        g_step_rate   = (int16_t)tc.i1;
-                        g_step_div    = (uint8_t)tc.i3;
-                        g_step_cnt    = 0;
-                        g_step_t0     = HAL_GetTick();
-                        g_step_end    = g_step_t0 + (uint32_t)tc.i2;
-                        g_step_first  = 1;
-                        g_step_active = 1;
-                        cmd_note("STEP%d %d", g_step_m, g_step_rate);
-                        ack("STEP GO %d %d %d %d\r\n", tc.i0, tc.i1, tc.i2, tc.i3);
+                        /* [app_control 拆分] 校验/激活/安全前置全部在模块内 */
+                        bridge_ret_t sr = app_control_step_start(
+                            (uint8_t)tc.i0, (int16_t)tc.i1,
+                            (uint32_t)tc.i2, (uint8_t)tc.i3, HAL_GetTick());
+                        if (sr == BRIDGE_OK) {
+                            cmd_note("STEP%d %d", tc.i0, tc.i1);
+                            ack("STEP GO %d %d %d %d\r\n", tc.i0, tc.i1, tc.i2, tc.i3);
+                        } else if (sr == BRIDGE_ERR_BUSY) {
+                            ack("STEP BUSY\r\n"); cmd_note("STEP BUSY");
+                        } else {
+                            ack("STEP BAD\r\n"); cmd_note("STEP BAD");
+                        }
                         break;
                     }
                     case TXTCMD_TEL:
-                        g_tel_on = tc.i0 ? 1 : 0;
-                        cmd_note("TEL %d", g_tel_on);
-                        ack("TEL:%d\r\n", g_tel_on);
+                        app_control_tel_set((uint8_t)tc.i0);
+                        cmd_note("TEL %d", tc.i0 ? 1 : 0);
+                        ack("TEL:%d\r\n", tc.i0 ? 1 : 0);
                         break;
                     case TXTCMD_FF:
                         if (tc.i0 < 0 || tc.i0 > 500) { ack("FF BAD\r\n"); cmd_note("FF BAD"); break; }
@@ -846,51 +824,38 @@ int main(void)
                         ack("FF:%d.%02d\r\n", tc.i0 / 100, tc.i0 % 100);
                         break;
                     case TXTCMD_REC:
-                        g_rec_on = tc.i0 ? 1 : 0;
-                        if (g_rec_on) g_rec_cnt = 0;   /* 开启即清空缓冲 */
-                        cmd_note("REC %d", g_rec_on);
-                        ack("REC:%d\r\n", g_rec_on);
+                        app_control_rec_set((uint8_t)tc.i0);
+                        cmd_note("REC %d", tc.i0 ? 1 : 0);
+                        ack("REC:%d\r\n", tc.i0 ? 1 : 0);
                         break;
-                    case TXTCMD_DUMP: {
-                        /* 重放机内记录: 首行报条数, 末行报结束 — PC 端按条数校验补全
-                         * [已知限制] 逐行 20ms 匀速发送 (~1.3s 阻塞主循环) — 爆发式连发会
-                         * 触发 BT04 FIFO 溢出丢行 (实测 9:1), 换 DMA 后可移除延时 */
-                        g_rec_on = 0;
-                        ack("DUMP %d\r\n", g_rec_cnt);
-                        for (uint16_t i = 0; i < g_rec_cnt; i++) {
-                            char tb[44];
-                            int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d\r\n",
-                                              (unsigned long)rec_tick[i],
-                                              rec_t0[i], rec_r0[i], rec_t1[i], rec_r1[i]);
-                            if (tn > 0) tx_raw(tb, tn);
-                            HAL_Delay(20);
-                        }
-                        ack("DUMP END\r\n");
-                        cmd_note("DUMP");
+                    case TXTCMD_DUMP:
+                        /* [app_control 拆分] 重放输出/延时/收尾全部在模块内 */
+                        app_control_rec_dump();
                         break;
-                    }
                     case TXTCMD_ODOM:
-                        g_odom_on = tc.i0 ? 1 : 0;
-                        cmd_note("ODOM %d", g_odom_on);
-                        ack("ODOM:%d\r\n", g_odom_on);
+                        app_control_odom_set((uint8_t)tc.i0);
+                        cmd_note("ODOM %d", tc.i0 ? 1 : 0);
+                        ack("ODOM:%d\r\n", tc.i0 ? 1 : 0);
                         break;
                     case TXTCMD_WD:
-                        /* 范围 0~60000ms, 0=关; 使能时刷新喂狗时刻并解除闩锁 */
-                        if (tc.i0 < 0 || tc.i0 > 60000) { ack("WD BAD\r\n"); cmd_note("WD BAD"); break; }
-                        g_wd_ms = (uint32_t)tc.i0;
-                        g_last_rx_tick = HAL_GetTick();
-                        g_wd_fired = 0;
-                        cmd_note("WD %dms", tc.i0);
-                        ack("WD:%d\r\n", tc.i0);
+                        /* 范围 0~60000ms, 0=关 (校验在 app_control); 使能时刷新喂狗时刻 */
+                        if (app_control_wd_set((uint32_t)tc.i0) != BRIDGE_OK) {
+                            ack("WD BAD\r\n"); cmd_note("WD BAD");
+                        } else {
+                            g_last_rx_tick = HAL_GetTick();
+                            cmd_note("WD %dms", tc.i0);
+                            ack("WD:%d\r\n", tc.i0);
+                        }
                         break;
 
                     /* ---- IMU 工具链 (解析域校验在 txt_cmd, 数值域在此; 执行端 = imu_bridge) ---- */
                     case TXTCMD_ITEL:
-                        if (tc.i0 < 0 || tc.i0 > 2) { ack("ITEL BAD\r\n"); cmd_note("ITEL BAD"); break; }
-                        g_itel_mode = (uint8_t)tc.i0;
-                        g_itel_div = 0;   /* 开/关都对齐分频相位 */
-                        cmd_note("ITEL %d", g_itel_mode);
-                        ack("ITEL:%d\r\n", g_itel_mode);
+                        if (app_control_itel_set((uint8_t)tc.i0) != BRIDGE_OK) {
+                            ack("ITEL BAD\r\n"); cmd_note("ITEL BAD");
+                        } else {
+                            cmd_note("ITEL %d", tc.i0);
+                            ack("ITEL:%d\r\n", tc.i0);
+                        }
                         break;
                     case TXTCMD_IGAIN:
                         /* Mahony 增益 ×100 (RAM 生效, 断电失); 允许 0 0 = 纯陀螺积分 (E2 实验) */
@@ -906,10 +871,12 @@ int main(void)
                         ack("IDRIFT:%d\r\n", tc.i0);
                         break;
                     case TXTCMD_IRATE:
-                        if (tc.i0 < 20 || tc.i0 > 1000) { ack("IRATE BAD\r\n"); cmd_note("IRATE BAD"); break; }
-                        g_imu_period_ms = (uint16_t)tc.i0;
-                        cmd_note("IRATE %d", tc.i0);
-                        ack("IRATE:%d\r\n", tc.i0);
+                        if (app_control_imu_rate_set((uint16_t)tc.i0) != BRIDGE_OK) {
+                            ack("IRATE BAD\r\n"); cmd_note("IRATE BAD");
+                        } else {
+                            cmd_note("IRATE %d", tc.i0);
+                            ack("IRATE:%d\r\n", tc.i0);
+                        }
                         break;
                     case TXTCMD_ICAL:
                         /* 前置: 车体静止水平; 之后 50 拍(默认5s)校准, 完成后 yaw 归零 */
@@ -963,173 +930,11 @@ int main(void)
         for (uint8_t li = 0; li < LINK_COUNT; li++)
             if (in_frame[li] && (HAL_GetTick() - t_frame[li]) > 100) { in_frame[li] = 0; f_len[li] = 0; }
 
-        /* ② PID 独立运行 — 每 CAR_CTRL_PERIOD_MS，不受 OLED 拖累 */
+        /* ② + ③b → app_control (2026-09-20 拆分): 50ms 控制体（判活喂入/WD/STEP/
+         * 闭环搬运/odom 组帧/TEL/REC）与 IMU 独立节拍（update_filter/ITEL）已整体
+         * 迁往 Core/Src/app/app_control.c, 节拍门内聚在模块内, 此处只喂时间 */
         uint32_t now = HAL_GetTick();
-        if (now - t_pid >= CAR_CTRL_PERIOD_MS) {
-            t_pid = now;
-
-            /* ═══ [P2 双链路仲裁] USB 判活喂入 (每控制节拍一次; 内部做边沿检测:
-             *  失联 → 自动 failover + 广播; 恢复 → 仅广播 USB READY 不抢回) ═══ */
-#if LINK_BOTH_ENABLED
-            {
-                uint8_t alive = (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
-                                 hUsbDeviceFS.pClassData != NULL && g_usb_dtr) ? 1u : 0u;
-                (void)link_arb_notify((int8_t)alive, now);
-            }
-#endif
-            /* [P3 开关收口] 单链路模式: 不喂伪判活 (喂了只会让仲裁状态机在
-             * "确定不存在的那条链路"上做无意义边沿), 仲裁保持 init 时的固定 owner */
-
-            /* ═══ 命令看门狗: 超时无任何下行字节 → 急停一次 (闩锁防刷屏) ═══
-             * 断链恢复 = 收到任意字节自动解除闩锁 (主循环喂狗处), 无需重新配置 */
-            if (g_wd_ms > 0 && !g_wd_fired &&
-                (now - g_last_rx_tick) > g_wd_ms) {
-                for (int i = 0; i < 2; i++) speed_loop_stop(i);
-                line_follower_enable(0);
-                line_follower_set_auto(0);
-                steering_center();
-                g_wd_fired = 1;
-                cmd_note("WD TIMEOUT");
-                tx_raw("WD TIMEOUT STOP\r\n", 17);
-            }
-
-            /* ═══ 调参工具链: 开环阶跃测试 (激活时独占执行链, 20Hz CSV 遥测) ═══
-             * 测速复用执行组件 speed_loop_measure()（回绕校正 + 反馈符号与闭环同一份实现，
-             * 杜绝"两处测速逻辑靠注释维持同源"的分叉隐患），
-             * 遥测行 "t_ms,rate_0E3,rpm_x10" — 与 PC 端辨识程序/VOFA+ 的接口契约,
-             * [对未完善部分的假设] 帧格式即 B3 接入契约 v0, 改动须升版本并同步 PC 工具 */
-            if (g_step_active) {
-                if (now < g_step_end) {
-                    (void)motor_bridge_set_rate_0E3(g_step_m, g_step_rate);
-                } else {
-                    g_step_active = 0;
-                    (void)motor_bridge_brake(g_step_m);
-                    speed_loop_reset(g_step_m);     /* 释放 PID + 测速基准作废 */
-                    ack("STEP END\r\n");
-                }
-                float step_rpm;
-                if (g_step_first) {
-                    speed_loop_resync(g_step_m, now);   /* 建基准并丢弃该帧（与原实现一致） */
-                    g_step_first = 0;
-                } else if (speed_loop_measure(g_step_m, now, &step_rpm) == SPEED_LOOP_OK) {
-                    /* 遥测分频发射: 弱链路(如 BLE 桥)20Hz 会系统性丢行, div=2 → 10Hz */
-                    if ((++g_step_cnt % g_step_div) == 0) {
-                        int rpm10 = spd_to_int(step_rpm * 10.0f);
-                        char tb[36];
-                        int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d\r\n",
-                                          (unsigned long)(now - g_step_t0), (int)g_step_rate, rpm10);
-                        if (tn > 0) tx_raw(tb, tn);  /* [已知限制] 阻塞发送 ~16ms@9600, 开环测试可容忍; DMA 化见 P1-6 */
-                    }
-                }
-            }
-            /* ═══ 正常闭环控制 (阶跃激活时整段旁路) ═══ */
-            else {
-            /* ═══ 寻迹控制（启用时把运动意图推给执行组件） ═══ */
-            line_follower_update(now, g_lf_tgt, g_lf_dir,
-                                 encoder_get_count(&henc1),
-                                 encoder_get_count(&henc2));
-            if (line_follower_enabled()) {  /* 未启用时巡线不写缓冲 → 保留命令下发的意图 */
-                for (uint8_t m = 0; m < 2; m++)
-                    speed_loop_set_target(m, g_lf_tgt[m] * (float)g_lf_dir[m]);
-            }
-            /* ═══ 速度环执行组件: 测速 → PID+前馈 → 限幅 → 下发 ═══
-             * "0 速必停"与"内轮停车"语义已在组件内强制（原 main.c 两处停车分支合并） */
-            speed_loop_update(now);
-
-            /* ═══ 里程计感知组件: 增量位姿解算 (50ms 与控制环同拍) ═══
-             * 恒解算保持位姿新鲜; 仅 g_odom_on 时组帧发送 (ODOM 20Hz + ATT 10Hz)
-             * 帧格式见 PV 区注释 — 上位机按"帧头+CMD"分发, 无校验(需求方确认) */
-            odom_delta_t od;
-            if (odom_update(now, &od) == ODOM_OK && g_odom_on) {
-                uint8_t ob[20];
-                float   th = od.dtheta_deg;
-                ob[0] = 0xAA; ob[1] = ODOM_FRAME_CMD;
-                memcpy(&ob[2],  &od.dx_mm, 4);
-                memcpy(&ob[6],  &od.dy_mm, 4);
-                memcpy(&ob[10], &th,       4);
-                memcpy(&ob[14], &now,      4);
-                ob[18] = 0xFF; ob[19] = 0xFF;
-                tx_raw((const char *)ob, 20);
-                if ((++g_att_div & 1) == 0) {   /* ATT 10Hz: 欧拉角透传 (IMU Mahony) */
-                    uint8_t ab[20];
-                    float r = imu_bridge_get_roll(0);
-                    float p = imu_bridge_get_pitch(0);
-                    float y = imu_bridge_get_yaw(0);
-                    ab[0] = 0xAA; ab[1] = ATT_FRAME_CMD;
-                    memcpy(&ab[2],  &r,   4);
-                    memcpy(&ab[6],  &p,   4);
-                    memcpy(&ab[10], &y,   4);
-                    memcpy(&ab[14], &now, 4);
-                    ab[18] = 0xFF; ab[19] = 0xFF;
-                    tx_raw((const char *)ab, 20);
-                }
-            }
-
-            /* ═══ 调参工具链: 闭环遥测 (10Hz CSV, 仅 TEL 1 时发射) ═══
-             * 行 "tick,tgt0,rpm0,tgt1,rpm1" — B3 接入契约 v0, 同帧快照
-             * [已知限制] 阻塞发送 ~21ms@9600, 仅整定会话开启; DMA 化后可提频 */
-            if (g_tel_on && (++g_tel_div & 1) == 0) {
-                speed_loop_state_t s0, s1;
-                speed_loop_get_state(0, &s0); speed_loop_get_state(1, &s1);
-                char tb[44];
-                int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d\r\n",
-                                  (unsigned long)now,
-                                  (int)s0.target_rpm, spd_to_int(s0.actual_rpm),
-                                  (int)s1.target_rpm, spd_to_int(s1.actual_rpm));
-                if (tn > 0) tx_raw(tb, tn);
-            }
-
-            /* ═══ 调参工具链: 机内记录 (20Hz 写 RAM, DUMP 重放) — 对抗无线丢行 ═══ */
-            if (g_rec_on && g_rec_cnt < REC_MAX) {
-                speed_loop_state_t s0, s1;
-                speed_loop_get_state(0, &s0); speed_loop_get_state(1, &s1);
-                rec_tick[g_rec_cnt] = now;
-                rec_t0[g_rec_cnt] = (int16_t)s0.target_rpm;
-                rec_r0[g_rec_cnt] = (int16_t)spd_to_int(s0.actual_rpm);
-                rec_t1[g_rec_cnt] = (int16_t)s1.target_rpm;
-                rec_r1[g_rec_cnt] = (int16_t)spd_to_int(s1.actual_rpm);
-                g_rec_cnt++;
-            }
-            } /* 正常闭环控制 else 段结束 */
-        }
-
-        /* ③b IMU 感知更新 — 独立节拍 (IRATE 可调, 默认 100ms = 原 100ms 显示块节拍)
-         * 从显示块拆出: ① 更新周期可调 (E3 实验: 10Hz 快转漏角对照) ② 不受显示跳拍影响;
-         * ITEL 遥测随更新发射, 2 分频 (默认 5Hz, ~45B/行 ≈ 23%@9600) */
-        if (now - t_imu >= g_imu_period_ms) {
-            t_imu = now;
-            (void)imu_bridge_update_filter(0, now);
-            if (g_itel_mode > 0 && (++g_itel_div & 1) == 0) {
-                int16_t gx, gy, gz;
-                float drx, dry, drz, gs = imu_bridge_gyro_scale(0);   /* LSB/(°/s) */
-                float r = imu_bridge_get_roll(0), p = imu_bridge_get_pitch(0), y = imu_bridge_get_yaw(0);
-                float d10 = 10.0f, d100 = 100.0f;
-                if (imu_bridge_read_gyro_raw(0, &gx, &gy, &gz) != BRIDGE_OK) { gx = gy = gz = 0; }
-                (void)imu_bridge_get_drift(0, &drx, &dry, &drz);
-                float gxf = gx / gs, gyf = gy / gs, gzf = gz / gs;    /* raw → °/s */
-                char tb[56];
-                int tn;
-                if (g_itel_mode == 2) {
-                    /* VOFA+ FireWater: 7 通道真实物理量 (逗号分隔+换行即其协议格式) */
-                    char c1[10], c2[10], c3[10], c4[10], c5[10], c6[10], c7[10];
-                    fmt_f2(c1, 10, gxf); fmt_f2(c2, 10, gyf); fmt_f2(c3, 10, gzf);
-                    fmt_f2(c4, 10, r);   fmt_f2(c5, 10, p);   fmt_f2(c6, 10, y);
-                    fmt_f2(c7, 10, drz);
-                    tn = snprintf(tb, sizeof(tb), "%s,%s,%s,%s,%s,%s,%s\r\n",
-                                  c1, c2, c3, c4, c5, c6, c7);
-                } else {
-                    tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
-                                  (unsigned long)now,
-                                  (int)(gxf * d10), (int)(gyf * d10), (int)(gzf * d10),
-                                  (int)((r < 0) ? (r * d10 - 0.5f) : (r * d10 + 0.5f)),
-                                  (int)((p < 0) ? (p * d10 - 0.5f) : (p * d10 + 0.5f)),
-                                  (int)((y < 0) ? (y * d10 - 0.5f) : (y * d10 + 0.5f)),
-                                  (int)imu_bridge_stable(0),
-                                  (int)((drz < 0) ? (drz * d100 - 0.5f) : (drz * d100 + 0.5f)));
-                }
-                if (tn > 0) tx_raw(tb, tn);
-            }
-        }
+        app_control_task(now);
 
         /* ③ 每 100ms 刷新显示 + 传感器
          * [OLED 分页轮转] 每 100ms 只刷 1 页 (8 页 800ms 轮完) — I2C2 异常时每页

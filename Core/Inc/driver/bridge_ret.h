@@ -47,6 +47,7 @@ typedef enum {
     BRIDGE_ERR_BAD_ARG  = 2,   /* 入参非法：id 越界 / handle 为 NULL / 值为非有限数 */
     BRIDGE_ERR_BAD_CFG  = 3,   /* 配置非法：协议/类型枚举不支持、标定值区间不成立 */
     BRIDGE_ERR_IO       = 4,   /* 下层器件/总线返回错误（器件层已报告，桥只做透传） */
+    BRIDGE_ERR_BUSY     = 5,   /* 资源占用（如阶跃测试激活期; 2026-09-20 app_control 引入） */
 } bridge_ret_t;
 
 #ifdef __cplusplus
