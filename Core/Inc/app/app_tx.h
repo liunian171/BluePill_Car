@@ -43,12 +43,13 @@ bridge_ret_t app_tx_init(const app_tx_cfg_t *cfg);
 void app_tx_send_by_link(uint8_t link, const char *buf, int n);  /* 应答: 谁的命令回谁 */
 void app_tx_send_to_owner(const char *buf, int n);               /* 仲裁广播: 到达指挥权方 */
 
-/* ---- 状态（供 app_link 门控与 app_display 页7; 未 init 返回安全默认值） ---- */
+/* ---- 状态（供 app_link 门控与 app_display 页7; 未 init 返回安全默认值） ----
+ * 2026-09-20 订正: 页7 "U:<秒>" 实为"距最近一次 UART 字节的秒数"(归 app_link,
+ * 由其 rx 活动数据得出), app_tx 只负责 owner 字符串与 USB 在线状态。 */
 uint8_t     app_tx_owner_main_link(void);  /* 指挥权(已换算到 APP_LINK_* 口径) */
 void        app_tx_set_active(uint8_t link);       /* 命令来源链路登记 */
-const char *app_tx_owner_str(void);                /* "USB"/"UART"/"OFF" */
-uint8_t     app_tx_usb_on(void);                   /* USB 在线 */
-uint32_t    app_tx_usb_uptime_s(void);             /* USB 在线秒数 */
+const char *app_tx_owner_str(void);                /* "USB"/"UART" */
+uint8_t     app_tx_usb_on(void);                   /* USB 在线(dev_state+pClassData, 直读) */
 
 #ifdef __cplusplus
 }

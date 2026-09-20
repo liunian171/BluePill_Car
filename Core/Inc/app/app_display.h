@@ -30,10 +30,10 @@ typedef struct {
 
 /* ---- 依赖注入（健康数据源; 组件数据不注入, 直读组件 getter） ---- */
 typedef struct {
-    const char *(*owner_str)(void *ctx);   /* "USB"/"UART"/"OFF" (app_tx) */
+    const char *(*owner_str)(void *ctx);   /* "USB"/"UART" (app_tx) */
     uint8_t  (*usb_on)(void *ctx);         /* USB 链路在线 (app_tx) */
-    uint32_t (*usb_uptime_s)(void *ctx);   /* USB 在线秒数 (app_tx) */
     uint16_t (*rx_overflow)(void *ctx);    /* ringbuf 溢出和 (app_link) */
+    uint32_t (*uart_silence_s)(void *ctx); /* 距最近 UART 字节秒数 (app_link) */
     void *ctx;
 } app_display_io_t;
 

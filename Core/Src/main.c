@@ -19,6 +19,7 @@
 #include "car_config.h"          /* 组装层配置单: 功能/链路编译开关 (铁律: 仅组装层+CMake 可 include) */
 #include "usbd_cdc_if.h"
 #include "driver/link_arbiter.h"
+#include "app/app_tx.h"                /* 发送出口/路由/编号换算 (2026-09-20 拆分) */
 #include "driver/pwm.h"
 #include "driver/uart.h"
 #include "driver/uart_platform_ops.h"
@@ -300,49 +301,20 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *hal_huart)
     (void)uart_receive_IT(&uart_debug, &uart_debug.rx_byte);
 }
 
-/* [P1 双链路] USB CDC 原始发送 (非阻塞; BUSY 限时 10ms 兜底不无限等)
- * ⚠️ pClassData 空指针保护: 未枚举/未配置时 CDC_Transmit_FS 会解引用 NULL → 硬错误 */
-static void usb_send_raw(const char *buf, int n)
-{
-#if LINK_USB_ENABLED
-    if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED || hUsbDeviceFS.pClassData == NULL)
-        return;
-    uint32_t t0 = HAL_GetTick();
-    while (CDC_Transmit_FS((uint8_t *)buf, (uint16_t)n) == USBD_BUSY) {
-        if ((HAL_GetTick() - t0) > 10) return;
-    }
-#else
-    (void)buf; (void)n;   /* [P3] USB 链路编译期下线: 发送 no-op */
-#endif
-}
-
-/* [P1 双链路] UART 原始发送 (阻塞; 组装层唯一的 UART 发送出口)
- * [P3 开关收口] 链路禁用时整体 no-op —— 与 usb_send_raw 对称, 两个原始出口
- * 是"链路是否真的存在"的唯一判据点, 上层路由只管选谁, 不判在不在
- * [P1-1 补回该层 2026-09-20] 发送改经策略层 uart_send() → ops → HAL,
- * 不再直调; 超时 100ms 收敛在平台层 (原直调口径不变) */
-static void uart_send_raw(const char *buf, int n)
-{
-#if LINK_UART_ENABLED
-    (void)uart_send(&uart_debug, (const uint8_t *)buf, (uint16_t)n);
-#else
-    (void)buf; (void)n;   /* [P3] UART 链路编译期下线: 发送 no-op */
-#endif
-}
-
-/* [P1 双链路] 链路路由发送: 应答/遥测走最近命令的来源链路 (应答路由) */
+/* ==== [app_tx 拆分 2026-09-20] 发送出口/路由/编号换算迁往 Core/Src/app/app_tx.c ====
+ * 原始出口（usb_send_raw/uart_send_raw）与 owner 编号换算本体已入 app_tx（HAL 直调
+ * 收口到该模块）; 本文件仅留三个薄包装, 保持既有调用点不动（随 app_link 迁移收编）。
+ * g_active_link 暂留于此（应答路由的"最近命令来源", 随 app_link 模块迁移）。 */
 static void link_tx(const char *buf, int n)
 {
-    if (g_active_link == LINK_USB) usb_send_raw(buf, n);
-    else                           uart_send_raw(buf, n);
+    app_tx_send_by_link(g_active_link, buf, n);
 }
 
 /* [P2 双链路仲裁] 按 owner 链路发送 (仲裁广播 USB LOST / USB READY 专用 —
  * 与应答路由不同: 广播必须到达指挥权方, 而不是最后发命令的一方) */
 static void link_owner_tx(const char *buf, int n)
 {
-    if (link_arb_owner() == LINK_ARB_USB) usb_send_raw(buf, n);
-    else                                  uart_send_raw(buf, n);
+    app_tx_send_to_owner(buf, n);
 }
 
 /* [P2 双链路仲裁] 调参会话激活判据 (会话锁注入, 设计文档 §2.3) */
@@ -357,19 +329,10 @@ static void arb_broadcast(const char *msg)
     link_owner_tx(msg, (int)strlen(msg));
 }
 
-/* [P2 双链路仲裁] ⚠️ 编号换算: main 消费循环 0=UART/1=USB, 仲裁枚举 0=USB/1=UART
- * — 两套编号相反, 直接比较必错 (2026-09-19 真机抓出: 门控形同虚设)
- * [P3 开关收口] 单链路模式下直接返回唯一存活链路: 仲裁状态机仍会跑, 但"谁能指挥"
- * 的答案不该依赖它 —— 禁用链路的 BUSY 门控/看门狗喂狗都走这里 */
+/* [P2/P3] 编号换算薄包装: 本体在 app_tx_owner_main_link()（唯一收口） */
 static uint8_t owner_main_link(void)
 {
-#if !LINK_USB_ENABLED
-    return LINK_UART;      /* 只剩 UART 链路 */
-#elif !LINK_UART_ENABLED
-    return LINK_USB;       /* 只剩 USB 链路 */
-#else
-    return (link_arb_owner() == LINK_ARB_USB) ? LINK_USB : LINK_UART;
-#endif
+    return app_tx_owner_main_link();
 }
 
 /* 裸发送: 不记录 OLED 应答页 (寻迹诊断等高频事件用) */
@@ -528,6 +491,18 @@ int main(void)
 #endif
     ringbuf_init(&g_ringbuf_uart);
     ringbuf_init(&g_ringbuf_usb);   /* [P1 双链路] */
+
+    /* ---- [app_tx 拆分 2026-09-20] 发送出口模块: 开关/超时经 cfg 注入 ----
+     * 必须先于任何发送（含仲裁广播与 UART2 Ready 横幅） */
+    {
+        app_tx_cfg_t tx_cfg = {
+            .uart_enabled         = LINK_UART_ENABLED,
+            .usb_enabled          = LINK_USB_ENABLED,
+            .usb_busy_timeout_ms  = 10,     /* 原直调口径 */
+            .uart_block_timeout_ms = 100,
+        };
+        if (app_tx_init(&tx_cfg) != BRIDGE_OK) Error_Handler();
+    }
 
     /* ---- [P2 双链路仲裁] 上电 usb_alive 初值 ----
      * 双链路: 未知(-1), 枚举异步完成, 由宽限期逻辑兜底 (超时不活 → 自动切 UART)
@@ -1232,8 +1207,7 @@ int main(void)
                  * UART: MCU 无法感知 SPP 连接态, 显示距最近收字节的秒数 (从未收过显 "-")
                  * [P3] USB 链路编译期下线时不宣称在线 (恒 OFF), 免得与实测矛盾 */
 #if LINK_USB_ENABLED
-                uint8_t usb_on = (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
-                                  hUsbDeviceFS.pClassData != NULL);
+                uint8_t usb_on = app_tx_usb_on();   /* [app_tx 拆分] 状态读出收口 */
 #else
                 uint8_t usb_on = 0;
 #endif
@@ -1253,12 +1227,12 @@ int main(void)
 #endif
                 if (oled_e || rb_ovf)     /* 有异常才挤掉 USB 状态字段, 正常态保持原版式 */
                     snprintf(b,sizeof(b),"L:%s E%d O%d %s",
-                             (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART",
+                             app_tx_owner_str(),
                              (int)oled_e, (int)rb_ovf,
                              oled_bridge_fused() ? "FZ" : us);
                 else
                     snprintf(b,sizeof(b),"L:%s USB:%s U:%s",
-                             (link_arb_owner() == LINK_ARB_USB) ? "USB" : "UART",
+                             app_tx_owner_str(),
                              usb_on ? "ON" : "OFF", us);
                 oled_line(7,b); break;
             }

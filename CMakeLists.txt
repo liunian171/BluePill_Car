@@ -48,6 +48,7 @@ file(GLOB USER_SOURCES
     Core/Src/driver/*.cpp
     Core/Src/common/*.c
     Core/Src/common/*.cpp
+    Core/Src/app/*.c
 )
 
 # ---- 功能编译开关（单一真值源 = Core/Inc/car_config.h，详开发跟踪 2026-09-19 设计决议）----

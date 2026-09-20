@@ -59,6 +59,7 @@ void app_link_usb_rx_isr(uint8_t byte);    /* usbd_cdc_if.c 经注册 sink 调�
 
 /* ---- 只读查询（OLED 页7 数据源; 未 init 返回安全默认值 0） ---- */
 uint16_t app_link_rx_overflow(void);       /* 双 ringbuf 溢出计数之和 */
+uint32_t app_link_uart_silence_s(void);    /* 距最近 UART 字节的秒数; 从未收到 → 0xFFFFFFFF(页7 显 "-") */
 
 #ifdef __cplusplus
 }
