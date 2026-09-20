@@ -347,7 +347,10 @@ bridge_ret_t app_wiring_load(void)
      * alive_init: 双链路=未知(-1) 宽限观望; USB=0 判死(固定 UART); UART=0 判活(固定 USB) */
     s_failed = "link_arbiter";
     {
-        LinkArbCfg ac = {
+        /* ⚠️ 必须 static：link_arb_init 只保存 cfg 指针（组件层"配置注入"契约，
+         * 调用方保证生命周期）。若为栈上局部变量，函数返回后 s_cfg 悬垂 →
+         * failover 广播时跳垃圾函数指针 → INVSTATE HardFault（2026-09-20 真机定位）。 */
+        static const LinkArbCfg ac = {
             .session_active = arb_session_active_cb,
             .broadcast      = arb_broadcast_cb,
             .boot_grace_ms  = 3000,

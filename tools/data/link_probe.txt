@@ -1,10 +1,10 @@
-link_probe @ 2026-09-20 17:40:18
+link_probe @ 2026-09-20 21:16:32
 COM11    蓝牙?      探测超时 (口被其它软件占用, 或 SPP 链路挂死)
 COM3     蓝牙?      探测超时 (口被其它软件占用, 或 SPP 链路挂死)
-COM5     蓝牙?      无应答 (口在, 但固件不回 PONG: 未上电 / 不是本车 / 链路未通)
+COM5     蓝牙?      探测超时 (口被其它软件占用, 或 SPP 链路挂死)
 COM4     蓝牙?      ERR SerialTimeoutException
 COM6     蓝牙?      ERR SerialTimeoutException
 COM10    蓝牙?      ERR SerialTimeoutException
-COM12    BT04     探测超时 (口被其它软件占用, 或 SPP 链路挂死)
+COM12    BT04     打不开 (SerialException — 被占用 / 端口失效; USB 口见 31=需拔插复位枚举)
 COM14    蓝牙?      ERR SerialTimeoutException
-COM17    USB      PONG  首字节 0.4ms  OWNER:UART
+COM17    USB      PONG  首字节 4.8ms  OWNER:UART
