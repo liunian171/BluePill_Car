@@ -288,14 +288,16 @@ static int spd_to_int(float v)
     return (int)((v >= 0.0f) ? (v + 0.5f) : (v - 0.5f));
 }
 
-/* 中断回调 (UART 链路禁用时不接中断, 本回调不会被触发; 门控只为消除"半通"歧义) */
+/* 中断回调 (UART 链路禁用时不接中断, 本回调不会被触发; 门控只为消除"半通"歧义)
+ * [P1-1 补回该层 2026-09-20] 重挂改经策略层 uart_receive_IT() → ops → HAL,
+ * 不再直调; UART=0 时经 stub 自然 no-op (P3 门控升级为真两层) */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *hal_huart)
 {
     if (hal_huart->Instance != USART2) return;
 #if LINK_UART_ENABLED
     ringbuf_write(&g_ringbuf_uart, uart_debug.rx_byte);
 #endif
-    HAL_UART_Receive_IT(hal_huart, &uart_debug.rx_byte, 1);
+    (void)uart_receive_IT(&uart_debug, &uart_debug.rx_byte);
 }
 
 /* [P1 双链路] USB CDC 原始发送 (非阻塞; BUSY 限时 10ms 兜底不无限等)
@@ -316,11 +318,13 @@ static void usb_send_raw(const char *buf, int n)
 
 /* [P1 双链路] UART 原始发送 (阻塞; 组装层唯一的 UART 发送出口)
  * [P3 开关收口] 链路禁用时整体 no-op —— 与 usb_send_raw 对称, 两个原始出口
- * 是"链路是否真的存在"的唯一判据点, 上层路由只管选谁, 不判在不在 */
+ * 是"链路是否真的存在"的唯一判据点, 上层路由只管选谁, 不判在不在
+ * [P1-1 补回该层 2026-09-20] 发送改经策略层 uart_send() → ops → HAL,
+ * 不再直调; 超时 100ms 收敛在平台层 (原直调口径不变) */
 static void uart_send_raw(const char *buf, int n)
 {
 #if LINK_UART_ENABLED
-    HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)n, 100);
+    (void)uart_send(&uart_debug, (const uint8_t *)buf, (uint16_t)n);
 #else
     (void)buf; (void)n;   /* [P3] UART 链路编译期下线: 发送 no-op */
 #endif
@@ -543,8 +547,9 @@ int main(void)
         link_arb_init(&ac, alive_init, HAL_GetTick());
     }
 #if LINK_UART_ENABLED
-    HAL_UART_Receive_IT(&huart2, &uart_debug.rx_byte, 1);
-    HAL_UART_Transmit(&huart2, (uint8_t *)"UART2 Ready\r\n", 13, 100);
+    /* [P1-1 补回该层 2026-09-20] 收发首挂/横幅改经策略层, 不再直调 HAL */
+    (void)uart_receive_IT(&uart_debug, &uart_debug.rx_byte);
+    (void)uart_send(&uart_debug, (const uint8_t *)"UART2 Ready\r\n", 13);
 #endif
 
     /* ---- 编码器 ---- */

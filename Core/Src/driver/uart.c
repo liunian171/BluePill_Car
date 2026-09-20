@@ -11,14 +11,16 @@
  *
  *    ┌─ 策略层（本文件）─────────────┬─ 平台实现层（ops）──────────┐
  *    │  uart_send()                 │  send() / receive()         │
- *    │  uart_receive()              │  receive_IT()               │
- *    │  uart_receive_IT()           │                             │
- *    │  uart_flush_rx()             │                             │
+ *    │  uart_receive_IT()           │  receive_IT()               │
  *    ├──────────────────────────────┼─────────────────────────────┤
  *    │  参数转发（零逻辑）            │  原子操作（HAL 封装）         │
  *    │  跨平台通用                   │  每款芯片一套                │
  *    │  换平台零修改                 │  换平台整个文件替换           │
  *    └──────────────────────────────┴─────────────────────────────┘
+ *
+ *  2026-09-20 (P1-1 补回该层): uart_receive / uart_flush_rx 按 §7 判死删除
+ *  （此前全文件零调用 = 整层悬空, 审计 P1-1/P1-7）；现仅保留有真实调用者的
+ *  send 与 receive_IT。原语 receive 仍保留在平台 ops 表（原子集合完整）。
  *
  *  参考: pwm.c 的同架构设计思路, UART_Serial_Design.md 第三章
  * ============================================================================
@@ -46,20 +48,10 @@ int8_t uart_send(UART_Handle *hUART, const uint8_t *data, uint16_t len)
 
 
 /*==============================================================================
- *  接收（阻塞 — 仅调试用，正常接收走中断版本）
+ *  【已删除】uart_receive — 阻塞接收, 2026-09-20 按 §7 判死删除 (随 P1-1 补回批次)
+ *  全仓零调用者, "仅调试用"是意愿不是启用条件; git 历史可取回。
+ *  平台原语 ops->receive 保留（原子操作集合完整, 原语不需要调用者）。
  *==============================================================================*/
-
-/**
- * @brief  阻塞接收 len 字节
- * @param  hUART  UART 句柄
- * @param  data   接收数据缓冲区
- * @param  len    接收字节数
- * @return 0 成功, -1 失败
- */
-int8_t uart_receive(UART_Handle *hUART, uint8_t *data, uint16_t len)
-{
-    return hUART->ops->receive(hUART->huart, data, len);
-}
 
 
 /*==============================================================================
@@ -69,7 +61,7 @@ int8_t uart_receive(UART_Handle *hUART, uint8_t *data, uint16_t len)
 /**
  * @brief  启动中断接收
  *
- *         每收到 1 字节硬件自动触发 UART7_IRQHandler
+ *         每收到 1 字节硬件自动触发 USART2_IRQHandler
  *         → HAL_UART_IRQHandler → HAL_UART_RxCpltCallback
  *         回调中必须重新调本函数使能下一个字节，否则只收到一个。
  *
@@ -84,19 +76,7 @@ int8_t uart_receive_IT(UART_Handle *hUART, uint8_t *p_byte)
 
 
 /*==============================================================================
- *  清空缓冲区
+ *  【已删除】uart_flush_rx — 占位实现, 2026-09-20 按 §7 判死删除 (审计 P1-7)
+ *  无调用者 + 注释引用已删除的 uart_cmd_parser_init; git 历史可取回。
+ *  真需要清硬件 DR 时, 在平台层加原子原语 + 策略层组合实现。
  *==============================================================================*/
-
-/**
- * @brief  清空接收缓冲区，丢弃所有未读数据
- *
- *         TODO: 当前为占位实现。遇到 RX 线上有残留噪声字节导致
- *         帧解析混乱时，可以调用此函数在 uart_cmd_parser_init 之后、
- *         uart_receive_IT 之前清一次硬件 DR 寄存器。
- *         实现参考: HAL_UART_AbortReceive() 或循环读 DR 直到 RXNE=0。
- */
-int8_t uart_flush_rx(UART_Handle *hUART)
-{
-    /* TODO: 实现（可用 HAL_UART_AbortReceive() 或循环读 DR 寄存器） */
-    return 0;
-}

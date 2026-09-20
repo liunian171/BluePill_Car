@@ -5,24 +5,25 @@
  * 基于 STM32 HAL 库实现 UART_PlatformOps_t 的三个函数指针。
  *
  * 前置条件:
- *   · stm32f4xx_hal_conf.h 启用 HAL_UART_MODULE_ENABLED        ✅
- *   · CubeMX 配置 UART7 (Asynchronous, PE7=RX, PE8=TX, 115200 8N1) ✅
- *   · CubeMX NVIC 使能 UART7 global interrupt                  ✅
+ *   · stm32f1xx_hal_conf.h 启用 HAL_UART_MODULE_ENABLED        ✅
+ *   · CubeMX 配置 USART2 (Asynchronous, PA2=TX, PA3=RX, 9600 8N1, 接 BT04) ✅
+ *   · CubeMX NVIC 使能 USART2 global interrupt                 ✅
  *
  * 参考: pwm_platform_ops.c, UART_Serial_Design.md 第三章
  */
 
 #include "uart_platform_ops.h"
-#include "usart.h"          /* 提供 huart7 的 extern 声明（CubeMX 生成） */
+#include "usart.h"          /* 提供 huart2 的 extern 声明（CubeMX 生成） */
 
-/* 阻塞收发超时，当前固定 1000ms，如需可配则改为读 hUART->timeout_ms */
-#define UART_TIMEOUT_MS  1000
+/* 阻塞收发超时。对齐组装层原直调口径 HAL_UART_Transmit(...,100)（2026-09-20
+ * P1-1 补回该层时订正: 此前残留上游 A 板的 1000ms, 因整层死代码从未被执行
+ * 而未暴露 —— 死层危害实证）。9600 波特率下 13 字节应答 ≈13.5ms, 100ms 富余。 */
+#define UART_TIMEOUT_MS  100
 
 /* ================================================================
  *  uart_stm32_send
  *  阻塞发送 len 字节。
- *  内部调用 HAL_UART_Transmit(huart, data, len, 1000ms)。
- *  HCLK=180MHz 下硬件自动串并转换，不占用 CPU 运算时间。
+ *  内部调用 HAL_UART_Transmit(huart, data, len, 100ms)。
  *
  *  @retval 0   HAL_OK（发送完成）
  *  @retval -1  HAL_ERROR/HAL_BUSY/HAL_TIMEOUT（超时或错误）
@@ -56,8 +57,9 @@ int8_t uart_stm32_receive(void *huart_void, uint8_t *data, uint16_t len)
  *  调用 HAL_UART_Receive_IT(huart, p_byte, 1)。
  *
  *  中断链:
- *    RXNE 硬件中断 → UART7_IRQHandler → HAL_UART_IRQHandler
- *      → HAL_UART_RxCpltCallback（在 uart_cmd_parser.c 中实现）
+ *    RXNE 硬件中断 → USART2_IRQHandler → HAL_UART_IRQHandler
+ *      → HAL_UART_RxCpltCallback（组装层 main.c 实现, 2026-09-20 起经
+ *         策略层 uart_receive_IT 重挂）
  *         → ringbuf_write 存字节
  *         → 重新调用本函数使能下一个字节接收
  *

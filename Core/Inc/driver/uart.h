@@ -37,8 +37,8 @@
  * ============================================================================
  */
 
-#ifndef __UART_H__
-#define __UART_H__
+#ifndef UART_H
+#define UART_H
 
 #include <stdint.h>
 
@@ -54,7 +54,7 @@ extern "C" {
  *
  *  添加新操作时需注意：
  *    · 操作必须是与硬件寄存器打交道的"原子操作"
- *    · 组合逻辑（如 flush 的实现）应放在 uart.c 的策略层，而非 ops 内
+ *    · 组合逻辑应放在 uart.c 的策略层，而非 ops 内
  *==============================================================================*/
 typedef struct UART_PlatformOps_t
 {
@@ -103,13 +103,6 @@ typedef struct UART_Handle
 int8_t uart_send(UART_Handle *hUART, const uint8_t *data, uint16_t len);
 
 /**
- * @brief 阻塞接收 len 字节（仅调试用，正常接收走中断模式）
- * @note  会阻塞主循环直到收满 len 字节或超时，不要在产品代码中用
- * @retval 0 成功  -1 超时/HAL 错误
- */
-int8_t uart_receive(UART_Handle *hUART, uint8_t *data, uint16_t len);
-
-/**
  * @brief 启动中断接收 — 每收到 1 字节触发 RxCpltCallback
  * @param hUART  UART 句柄
  * @param p_byte 存放收到字节的地址（指向 hUART->rx_byte）
@@ -120,14 +113,12 @@ int8_t uart_receive(UART_Handle *hUART, uint8_t *data, uint16_t len);
  */
 int8_t uart_receive_IT(UART_Handle *hUART, uint8_t *p_byte);
 
-/**
- * @brief 清空 RX 缓冲区，丢弃未读数据（当前占位，待补）
- * @retval 0 成功
- */
-int8_t uart_flush_rx(UART_Handle *hUART);
+/* 2026-09-20 (审计 P1-1/P1-7 处置): uart_receive 与 uart_flush_rx 按 §7 判死
+ * 删除（全仓零调用; flush_rx 另有引用已删文件的占位问题）。git 历史可取回。
+ * 阻塞接收原语仍保留在平台 ops 表, 将来需要时在策略层重建包装即可。 */
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __UART_H__ */
+#endif /* UART_H */
