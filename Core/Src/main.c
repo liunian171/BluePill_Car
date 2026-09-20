@@ -304,7 +304,7 @@ static int32_t  ctl_enc_count(uint8_t id, void *ctx)
     (void)ctx;
     return (id == 0) ? encoder_get_count(&henc1) : encoder_get_count(&henc2);
 }
-static void ctl_send_line(const char *s, void *ctx) { (void)ctx; tx_raw(s, (int)strlen(s)); }
+static void ctl_send_line(const char *s, int len, void *ctx) { (void)ctx; tx_raw(s, len); }
 static void ctl_note_cmd(const char *s, void *ctx)  { (void)ctx; cmd_note("%s", s); }
 static void ctl_resp(const char *s, void *ctx)      { (void)ctx; ack("%s", s); }
 static void ctl_delay_ms(uint32_t ms, void *ctx)    { (void)ctx; HAL_Delay(ms); }

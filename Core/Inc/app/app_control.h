@@ -39,7 +39,8 @@ typedef struct {
     uint32_t (*last_rx_tick)(void *ctx);          /* owner 链最近下行字节时刻 (WD 基准;
                                                      消费侧写入, 归 app_link) */
     int32_t  (*enc_count)(uint8_t id, void *ctx); /* 编码器读 (id 0/1; 绑 encoder 句柄) */
-    void (*send_line)(const char *s, void *ctx);  /* 裸发送一行 (tx_raw 等价; 不进页4) */
+    void (*send_line)(const char *s, int len, void *ctx); /* 裸发送 (tx_raw 等价; 不进页4)。
+                                                     ⚠️ len 必须显式给: ODOM/ATT 为含 0x00 的二进制帧, 严禁 strlen */
     void (*note_cmd)(const char *s, void *ctx);   /* 页6 命令记录 (cmd_note 等价) */
     void (*resp)(const char *s, void *ctx);       /* 应答+页4 (ack 等价) */
     void (*delay_ms)(uint32_t ms, void *ctx);     /* 阻塞延时 (DUMP 重放用; 绑 HAL_Delay) */

@@ -130,7 +130,7 @@ void app_control_task(uint32_t now)
             steering_center();
             s_wd_fired = 1;
             s_io.note_cmd("WD TIMEOUT", s_io.ctx);
-            s_io.send_line("WD TIMEOUT STOP\r\n", s_io.ctx);
+            s_io.send_line("WD TIMEOUT STOP\r\n", 17, s_io.ctx);
         }
 
         if (s_step_active) {
@@ -153,7 +153,7 @@ void app_control_task(uint32_t now)
                     int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d\r\n",
                                       (unsigned long)(now - s_step_t0),
                                       (int)s_step_rate, spd_to_int(step_rpm * 10.0f));
-                    if (tn > 0) s_io.send_line(tb, s_io.ctx);
+                    if (tn > 0) s_io.send_line(tb, tn, s_io.ctx);
                 }
             }
         } else {
@@ -179,7 +179,7 @@ void app_control_task(uint32_t now)
                 memcpy(&ob[10], &th,       4);
                 memcpy(&ob[14], &now,      4);
                 ob[18] = 0xFF; ob[19] = 0xFF;
-                s_io.send_line((const char *)ob, s_io.ctx);
+                s_io.send_line((const char *)ob, 20, s_io.ctx);
                 if ((++s_att_div & 1) == 0) {
                     uint8_t ab[20];
                     float r = imu_bridge_get_roll(0);
@@ -191,7 +191,7 @@ void app_control_task(uint32_t now)
                     memcpy(&ab[10], &y,   4);
                     memcpy(&ab[14], &now, 4);
                     ab[18] = 0xFF; ab[19] = 0xFF;
-                    s_io.send_line((const char *)ab, s_io.ctx);
+                    s_io.send_line((const char *)ab, 20, s_io.ctx);
                 }
             }
 
@@ -204,7 +204,7 @@ void app_control_task(uint32_t now)
                                   (unsigned long)now,
                                   (int)s0.target_rpm, spd_to_int(s0.actual_rpm),
                                   (int)s1.target_rpm, spd_to_int(s1.actual_rpm));
-                if (tn > 0) s_io.send_line(tb, s_io.ctx);
+                if (tn > 0) s_io.send_line(tb, tn, s_io.ctx);
             }
 
             /* ═══ 机内记录 (20Hz 写 RAM, DUMP 重放; 对抗无线丢行) ═══ */
@@ -255,7 +255,7 @@ void app_control_task(uint32_t now)
                               (int)imu_bridge_stable(0),
                               (int)((drz < 0) ? (drz * d100 - 0.5f) : (drz * d100 + 0.5f)));
             }
-            if (tn > 0) s_io.send_line(tb, s_io.ctx);
+            if (tn > 0) s_io.send_line(tb, tn, s_io.ctx);
         }
     }
 }
@@ -301,7 +301,7 @@ void app_control_rec_dump(void)
         int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d\r\n",
                           (unsigned long)s_rec_tick[i],
                           s_rec_t0[i], s_rec_r0[i], s_rec_t1[i], s_rec_r1[i]);
-        if (tn > 0) s_io.send_line(tb, s_io.ctx);
+        if (tn > 0) s_io.send_line(tb, tn, s_io.ctx);
         s_io.delay_ms(20, s_io.ctx);
     }
     s_io.resp("DUMP END\r\n", s_io.ctx);
