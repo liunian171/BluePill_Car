@@ -41,6 +41,7 @@ typedef struct {
     void (*override_manual)(void *ctx);            /* 接管权声明 (wiring 绑 line_follower_enable(0)) */
     void (*wd_feed)(void *ctx);                    /* owner 链路字节喂狗 (app_control) */
     uint8_t (*session_active)(void *ctx);          /* 调参会话判据 (app_control) */
+    void (*ppr_set)(uint8_t id, uint16_t ppr, void *ctx); /* E 命令在线改 PPR (绑编码器句柄) */
     void *ctx;
 } app_link_io_t;
 

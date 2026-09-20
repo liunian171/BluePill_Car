@@ -79,6 +79,11 @@ void app_tx_set_active(uint8_t link)
     s_active_link = (link == APP_LINK_USB) ? APP_LINK_USB : APP_LINK_UART;
 }
 
+uint8_t app_tx_active(void)
+{
+    return s_active_link;
+}
+
 uint8_t app_tx_owner_main_link(void)
 {
     /* [P3 编号换算] main 消费循环 0=UART/1=USB, 仲裁枚举 0=USB/1=UART —

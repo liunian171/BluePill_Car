@@ -24,7 +24,6 @@
 /* USER CODE BEGIN INCLUDE */
 #include <string.h>
 #include "common/ringbuf.h"
-extern RingBuffer g_ringbuf_usb;   /* 定义在 main.c PV 区 (P1 双链路) */
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -32,6 +31,8 @@ extern RingBuffer g_ringbuf_usb;   /* 定义在 main.c PV 区 (P1 双链路) */
 /* Private macro -------------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+/* [P1-8] 收包下沉槽: 组装层经 usbd_cdc_if_register_rx_sink 注入 */
+static void (*s_rx_sink)(uint8_t byte) = 0;
 /* Private variables ---------------------------------------------------------*/
 /* [P2 双链路仲裁] 上位机 DTR 状态: SET_CONTROL_LINE_STATE 捕获 (wValue bit0)。
  * 中断上下文写 / 主循环读, 单字节原子。usb_alive 判据用 (设计文档 §4.1)。 */
@@ -278,8 +279,13 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 #else
   /* [P1 双链路] CDC 收包 → usb ringbuf: ISR 只写不解析 (与 UART RxCpltCallback
    * 同构, doc/双链路仲裁设计文档.md §3.1); 主循环按消费契约统一消费 */
-  for (uint32_t i = 0; i < *Len; i++) {
-    ringbuf_write(&g_ringbuf_usb, Buf[i]);
+  /* [P1-8 注入式收包 2026-09-20] 不再直写组装层 ringbuf (下层引用上层的反向
+   * 依赖已消除) —— 字节交给组装层注册的 sink (app_link_usb_rx_isr)。
+   * ISR 只投递不解析的铁律不变; 未注册时丢弃 (USB_ECHO_TEST 模式走回显分支)。 */
+  if (s_rx_sink) {
+    for (uint32_t i = 0; i < *Len; i++) {
+      s_rx_sink(Buf[i]);
+    }
   }
 #endif
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
@@ -314,6 +320,10 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+void usbd_cdc_if_register_rx_sink(void (*fn)(uint8_t byte))
+{
+  s_rx_sink = fn;
+}
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 

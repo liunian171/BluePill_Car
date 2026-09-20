@@ -18,15 +18,11 @@
 
 #include <stdint.h>
 #include "driver/bridge_ret.h"
+#include "app/app_iface.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ---- 链路编号（main 消费口径: 0=UART / 1=USB, 与仲裁枚举换算在此收口） ---- */
-#define APP_LINK_UART   0
-#define APP_LINK_USB    1
-#define APP_LINK_COUNT  2
 
 /* ---- 配置（值由 app_wiring 从 car_config.h 翻译注入） ---- */
 typedef struct {
@@ -48,6 +44,7 @@ void app_tx_send_to_owner(const char *buf, int n);               /* 仲裁广播
  * 由其 rx 活动数据得出), app_tx 只负责 owner 字符串与 USB 在线状态。 */
 uint8_t     app_tx_owner_main_link(void);  /* 指挥权(已换算到 APP_LINK_* 口径) */
 void        app_tx_set_active(uint8_t link);       /* 命令来源链路登记 */
+uint8_t     app_tx_active(void);                   /* 最近命令来源链路 (应答路由读) */
 const char *app_tx_owner_str(void);                /* "USB"/"UART" */
 uint8_t     app_tx_usb_on(void);                   /* USB 在线(dev_state+pClassData, 直读) */
 

@@ -19,6 +19,12 @@
 
 #include <stdint.h>
 
+/* 链路编号 (共享词汇: main 消费口径 0=UART / 1=USB; 仲裁枚举相反,
+ * 换算收口在 app_tx_owner_main_link — 2026-09-19 真机 bug 教训) */
+#define APP_LINK_UART   0
+#define APP_LINK_USB    1
+#define APP_LINK_COUNT  2
+
 #ifdef __cplusplus
 extern "C" {
 #endif

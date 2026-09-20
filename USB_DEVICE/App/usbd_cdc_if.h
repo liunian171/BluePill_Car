@@ -93,6 +93,11 @@
 /** CDC Interface callback. */
 extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
 
+/* [P1-8 注入式收包 2026-09-20] CDC 收包下沉口: 组装层注册后, CDC_Receive_FS
+ * 把每个字节交给注入的 sink (ISR 上下文, 只投递不解析)。未注册时字节丢弃
+ * (USB_ECHO_TEST 回显模式不注册, 走自身回显路径)。 */
+void usbd_cdc_if_register_rx_sink(void (*fn)(uint8_t byte));
+
 /* USER CODE BEGIN EXPORTED_VARIABLES */
 
 /* USER CODE END EXPORTED_VARIABLES */
