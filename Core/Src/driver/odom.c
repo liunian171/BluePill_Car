@@ -145,5 +145,4 @@ odom_ret_t odom_get_pose(float *x_mm, float *y_mm, float *theta_deg)
     *x_mm = g_x; *y_mm = g_y; *theta_deg = g_th;
     return ODOM_OK;
 }
-
-uint8_t odom_is_init(void) { return g_init; }
+/* 2026-09-20 P1-6: odom_is_init 判死删除（§7 零调用）。 */

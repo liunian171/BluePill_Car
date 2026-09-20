@@ -94,11 +94,7 @@ uint8_t imu_bridge_ready(uint8_t id)
     return (id < MAX_IMUS) ? (uint8_t)(imu_ready[id] && attitude_ready(id)) : 0u;
 }
 
-float imu_bridge_accel_scale(uint8_t id)
-{
-    if (id >= MAX_IMUS || imu_devices[id] == nullptr) return 1.0f;
-    return imu_devices[id]->accel_scale();
-}
+/* 2026-09-20 P1-6: imu_bridge_accel_scale / read_accel_raw / drift_enabled 判死删除（§7）。 */
 
 float imu_bridge_gyro_scale(uint8_t id)
 {
@@ -114,14 +110,6 @@ uint8_t imu_bridge_cal_progress(uint8_t id) { return attitude_cal_progress(id); 
 uint8_t imu_bridge_stable(uint8_t id)       { return attitude_stable(id); }
 
 /* ---- 动作类 ---- */
-
-bridge_ret_t imu_bridge_read_accel_raw(uint8_t id, int16_t *ax, int16_t *ay, int16_t *az)
-{
-    if (id >= MAX_IMUS) return BRIDGE_ERR_BAD_ARG;
-    if (ax == nullptr || ay == nullptr || az == nullptr) return BRIDGE_ERR_BAD_ARG;
-    if (imu_devices[id] == nullptr) return BRIDGE_ERR_NOT_INIT;
-    return (imu_devices[id]->read_accel_raw(ax, ay, az) == 0) ? BRIDGE_OK : BRIDGE_ERR_IO;
-}
 
 bridge_ret_t imu_bridge_read_gyro_raw(uint8_t id, int16_t *gx, int16_t *gy, int16_t *gz)
 {
@@ -151,11 +139,6 @@ bridge_ret_t imu_bridge_set_drift_enable(uint8_t id, uint8_t en)
     if (id >= MAX_IMUS) return BRIDGE_ERR_BAD_ARG;
     if (imu_devices[id] == nullptr) return BRIDGE_ERR_NOT_INIT;
     return ret(attitude_set_drift_enable(id, en));
-}
-
-uint8_t imu_bridge_drift_enabled(uint8_t id)
-{
-    return (id < MAX_IMUS) ? attitude_drift_enabled(id) : 0u;
 }
 
 bridge_ret_t imu_bridge_recalibrate(uint8_t id)

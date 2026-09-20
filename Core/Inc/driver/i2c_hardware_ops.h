@@ -18,6 +18,12 @@ extern "C" {
 
 extern const I2C_PlatformOps_t i2c_hardware_platform_ops_stm32;
 
+/* ---- 异步传输槽（⚠️ 预留，2026-09-20 P1-6 登记启用条件）----
+ * start_transfer / is_busy 当前无调用者（IMU 走阻塞 mem 读写在 ops 表内）。
+ * 预留启用条件（满足其一即转正，届时期满复核）：
+ *   ① 启用 I2C2 中断/DMA 传输（CubeMX regen 恢复 EV 中断时，见调试总结 §25）；
+ *   ② useri2c 软 I2C（预留模块）启用 —— 二者共享 I2C_PlatformOps_t 异步接口族。
+ * 在此之前保持零调用状态；若两项均不启用，下次审计按 §7 判死删除。 */
 int8_t i2c_hardware_start_transfer(void *i2c_context,
                                    uint8_t device_address,
                                    uint8_t register_addr,
@@ -31,4 +37,4 @@ uint8_t i2c_hardware_is_busy(void *i2c_context);
 }
 #endif
 
-#endif /* __I2C_HARDWARE_OPS_H__ */
+#endif /* I2C_HARDWARE_OPS_H */

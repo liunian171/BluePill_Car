@@ -65,12 +65,8 @@ void imu_filter_mahony(imu_filter_t *f,
                        float gx, float gy, float gz,
                        float ax, float ay, float az, float dt);
 
-/* 全状态清零（四元数=单位、积分=0、角度=0；不动量程/增益/零偏） */
-void imu_filter_reset(imu_filter_t *f);
-
-/* 零偏校准：静止采样 N 拍取均值（count=1 时传入的即均值本身） */
-void imu_filter_calibrate_accel_bias(imu_filter_t *f, const int16_t *sx, const int16_t *sy,
-                                     const int16_t *sz, uint16_t count);
+/* 2026-09-20 P1-6: imu_filter_reset / imu_filter_calibrate_accel_bias 判死删除
+ * （§7 全仓零调用; 加速度零偏校准已由 attitude 组件启动校准状态机承担）。 */
 void imu_filter_calibrate_gyro_bias(imu_filter_t *f, const int16_t *sx, const int16_t *sy,
                                     const int16_t *sz, uint16_t count);
 

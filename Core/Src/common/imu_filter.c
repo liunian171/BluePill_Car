@@ -175,28 +175,15 @@ void imu_filter_init_from_accel(imu_filter_t *f, float ax, float ay, float az)
     f->yaw   = 0.0f;
 }
 
-void imu_filter_reset(imu_filter_t *f)
-{
-    f->q0 = 1.0f; f->q1 = 0.0f; f->q2 = 0.0f; f->q3 = 0.0f;
-    f->ifb_x = 0.0f;
-    f->ifb_y = 0.0f;
-    f->ifb_z = 0.0f;
-    f->roll = 0.0f; f->pitch = 0.0f; f->yaw = 0.0f;
-}
+/* 2026-09-20 P1-6: imu_filter_reset / imu_filter_calibrate_accel_bias 判死删除
+ * （§7 全仓零调用; 加速度零偏校准已由 attitude 组件的启动校准状态机承担）。
+ * filter_mean 保留 —— 陀螺零偏校准 (imu_filter_calibrate_gyro_bias) 仍使用。 */
 
 static int16_t filter_mean(const int16_t *samples, uint16_t count)
 {
     int32_t sum = 0;
     for (uint16_t i = 0; i < count; i++) sum += samples[i];
     return (int16_t)(sum / count);
-}
-
-void imu_filter_calibrate_accel_bias(imu_filter_t *f, const int16_t *sx, const int16_t *sy,
-                                     const int16_t *sz, uint16_t count)
-{
-    f->accel_bx = filter_mean(sx, count);
-    f->accel_by = filter_mean(sy, count);
-    f->accel_bz = filter_mean(sz, count) - (int16_t)f->accel_scale;  /* 减 1g */
 }
 
 void imu_filter_calibrate_gyro_bias(imu_filter_t *f, const int16_t *sx, const int16_t *sy,

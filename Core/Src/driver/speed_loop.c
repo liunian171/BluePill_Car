@@ -224,14 +224,7 @@ speed_loop_ret_t speed_loop_set_target(uint8_t id, float rpm_signed)
     }
     return SPEED_LOOP_OK;
 }
-
-speed_loop_ret_t speed_loop_get_target(uint8_t id, float *rpm_out)
-{
-    if (!ch_ok(id)) return s_inited ? SPEED_LOOP_ERR_BAD_ARG : SPEED_LOOP_ERR_NOT_INIT;
-    if (rpm_out == 0) return SPEED_LOOP_ERR_BAD_ARG;
-    *rpm_out = s_st[id].target_rpm;
-    return SPEED_LOOP_OK;
-}
+/* 2026-09-20 P1-6: speed_loop_get_target 判死删除（§7 零调用; 目标读出走 get_state）。 */
 
 speed_loop_ret_t speed_loop_stop(uint8_t id)
 {

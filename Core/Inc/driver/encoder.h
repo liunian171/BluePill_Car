@@ -35,13 +35,10 @@ typedef struct Encoder_Handle
 
 void encoder_start(Encoder_Handle *hencoder);
 
-void encoder_stop(Encoder_Handle *hencoder);
-
-void encoder_reset(Encoder_Handle *hencoder);
-
-void encoder_set_count(Encoder_Handle *hencoder, int32_t count);
-
 int32_t encoder_get_count(Encoder_Handle *hencoder);
+
+/* 2026-09-20 P1-6: encoder_stop / encoder_reset / encoder_set_count 判死删除
+ * （§7 全仓零调用）。平台原语 ops->stop / ops->set_counter 保留（原子集合完整）。 */
 
 #ifdef __cplusplus
 }
@@ -49,4 +46,4 @@ int32_t encoder_get_count(Encoder_Handle *hencoder);
 
 Encoder_PlatformOps_t *encoder_platform_get_ops(void);
 
-#endif // ENCODER
+#endif /* ENCODER_H */

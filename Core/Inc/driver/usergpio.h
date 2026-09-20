@@ -62,8 +62,8 @@ typedef struct
 // ========== 策略层函数（对标 pwm_set_duty_0E3）==========
 
 void usergpio_write(UserGPIO_Handle *hGPIO, uint8_t state);
-void usergpio_toggle(UserGPIO_Handle *hGPIO);
 uint8_t usergpio_read(UserGPIO_Handle *hGPIO);
+/* 2026-09-20 P1-6: usergpio_toggle 判死删除（§7 零调用; 平台原语 toggle 保留）。 */
 
 #ifdef __cplusplus
 }

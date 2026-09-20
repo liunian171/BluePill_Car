@@ -55,16 +55,15 @@ typedef struct {
 bridge_ret_t imu_bridge_init(uint8_t id, const imu_bridge_cfg_t *cfg);
 
 /* ---- 取值类：越界/未初始化返回安全默认值（注释中标明），不返回未定义值 ---- */
-uint8_t imu_bridge_ready(uint8_t id);                     /* 越界/未初始化 → 0 */
-float   imu_bridge_accel_scale(uint8_t id);               /* 越界/未初始化 → 1.0f（中性比例，勿当标定值用） */
+uint8_t imu_bridge_ready(uint8_t id);                     /* 越界/未初始化 → 0；update_filter 前置检查用 */
 float   imu_bridge_gyro_scale(uint8_t id);                /* 越界/未初始化 → 1.0f */
 float   imu_bridge_get_roll(uint8_t id);                  /* 越界/未初始化 → 0.0f（**不可当真实姿态**） */
 float   imu_bridge_get_pitch(uint8_t id);                 /* 同上 */
 float   imu_bridge_get_yaw(uint8_t id);                   /* 同上 */
 uint8_t imu_bridge_cal_progress(uint8_t id);              /* 0~100；越界 → 0（=未完成，安全侧） */
+/* 2026-09-20 P1-6: imu_bridge_accel_scale / read_accel_raw 按 §7 判死删除（零调用）。 */
 
 /* ---- 动作类：全部返回 bridge_ret_t ---- */
-bridge_ret_t imu_bridge_read_accel_raw(uint8_t id, int16_t *ax, int16_t *ay, int16_t *az);
 bridge_ret_t imu_bridge_read_gyro_raw(uint8_t id, int16_t *gx, int16_t *gy, int16_t *gz);
 /* 读 → 校准/漂移补偿 → Mahony 融合。**时间基准由调用方传入**（义务 5），
  * 故本桥不含 HAL_GetTick → 全桥家族零 HAL，可上 PC 桩 */
@@ -77,7 +76,8 @@ bridge_ret_t imu_bridge_set_drift_enable(uint8_t id, uint8_t en);
 /* 运行时漂移补偿开关 (E1 实验 / 修复验证用)。
  * 关闭语义: 停止跟踪**并清零**当前补偿值 — 完全无补偿的原始陀螺积分 (E1 要求);
  * 重新开启后从 0 重新跟踪 */
-uint8_t      imu_bridge_drift_enabled(uint8_t id);     /* 越界/未初始化 → 0 */
+/* 2026-09-20 P1-6: imu_bridge_drift_enabled (getter) 按 §7 判死删除（零调用；
+ * 开关状态本身归 attitude 组件私有）。 */
 bridge_ret_t imu_bridge_recalibrate(uint8_t id);
 /* 重新触发初始零偏校准 (ICAL): 复位校准状态机 + 清漂移补偿,
  * 之后的 IMU_CAL_SAMPLES 拍 (默认 50 拍) 需**车体静止**, 完成后自动重初始化四元数 (yaw 归零) */

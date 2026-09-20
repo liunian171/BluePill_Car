@@ -79,26 +79,13 @@ bridge_ret_t motor_bridge_set_rate_0E3(uint8_t id, int16_t rate_0E3)
     return BRIDGE_OK;
 }
 
-bridge_ret_t motor_bridge_stop(uint8_t id)
-{
-    bridge_ret_t r = motor_bridge_chk(id);
-    if (r != BRIDGE_OK) return r;
-    motor[id]->stop();
-    return BRIDGE_OK;
-}
+/* 2026-09-20 P1-6: motor_bridge_stop / motor_bridge_set_dead_zone 判死删除（§7），
+ * 停车语义由 speed_loop_stop + brake 承担。 */
 
 bridge_ret_t motor_bridge_brake(uint8_t id)
 {
     bridge_ret_t r = motor_bridge_chk(id);
     if (r != BRIDGE_OK) return r;
     motor[id]->brake();
-    return BRIDGE_OK;
-}
-
-bridge_ret_t motor_bridge_set_dead_zone(uint8_t id, float rpm)
-{
-    bridge_ret_t r = motor_bridge_chk(id);
-    if (r != BRIDGE_OK) return r;
-    motor[id]->set_dead_zone(rpm);
     return BRIDGE_OK;
 }

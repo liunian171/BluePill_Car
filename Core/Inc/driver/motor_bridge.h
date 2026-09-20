@@ -65,9 +65,9 @@ bridge_ret_t motor_bridge_init(uint8_t id, const motor_bridge_cfg_t *cfg);
 bridge_ret_t motor_bridge_set_speed_rpm(uint8_t id, float rpm);
 bridge_ret_t motor_bridge_set_speed_mps(uint8_t id, float mps);
 bridge_ret_t motor_bridge_set_rate_0E3(uint8_t id, int16_t rate_0E3); /* 千分比直通（阶跃测试用） */
-bridge_ret_t motor_bridge_stop(uint8_t id);
 bridge_ret_t motor_bridge_brake(uint8_t id);
-bridge_ret_t motor_bridge_set_dead_zone(uint8_t id, float rpm);
+/* 2026-09-20 P1-6: motor_bridge_stop / motor_bridge_set_dead_zone 按 §7 判死删除
+ * （全仓零调用; 停车语义由 speed_loop_stop + brake 承担）。git 历史可取回。 */
 
 #ifdef __cplusplus
 }

@@ -70,7 +70,12 @@ void line_follower_set_event_cb(line_event_cb_t cb);
 /** @brief IMU 校准完成后自动启动 */
 void line_follower_try_auto_start(uint8_t cal_ok, uint32_t now_ms);
 
-/* ---- 查询接口 ---- */
+/* ---- 查询接口 ----
+ * ⚠️ 预留（2026-09-20 P1-6 登记）：auto/base_spd/turn_spd/kp/kd/state/turn_dir/
+ * straight_cnt/turn_cnt 共 9 个 getter 当前零调用（GK/GS 应答走 main.c 回显、
+ * 页 4/7 已改作他用）。启用条件 = 巡线功能恢复批次（CAR_FEATURE_LINE_FOLLOWER=1
+ * 且感知拆分/实车整定时接回 OLED 或诊断链）；届时期满复核，届时不用则删。
+ * 注：line_follower_set_turn_speed 同批同判据。当前整模块处于编译期剔除（stub）。 */
 uint8_t line_follower_enabled(void);
 uint8_t line_follower_auto(void);
 float   line_follower_base_spd(void);

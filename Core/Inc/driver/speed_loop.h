@@ -135,7 +135,7 @@ speed_loop_ret_t speed_loop_resync(uint8_t id, uint32_t now_ms);
 
 /* ---- 意图入 ---- */
 speed_loop_ret_t speed_loop_set_target(uint8_t id, float rpm_signed);
-speed_loop_ret_t speed_loop_get_target(uint8_t id, float *rpm_out);
+/* 2026-09-20 P1-6: speed_loop_get_target 判死删除（§7 零调用; 目标读出走 get_state） */
 /* 零速停车：清目标 + 释放 PID + 物理刹停（BRK / 接管 / 急停用） */
 speed_loop_ret_t speed_loop_stop(uint8_t id);
 /* 仅清 PID 与测速状态，不动目标与输出（阶跃结束等场景） */
