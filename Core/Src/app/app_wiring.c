@@ -213,6 +213,12 @@ static void link_wd_feed(void *ctx)
     app_control_wd_rearm();
 }
 static uint8_t link_session_active(void *ctx)        { (void)ctx; return app_control_session_active(); }
+/* LinkArbCfg 回调签名 (无 ctx 指针): 适配两处 io 函数 */
+static uint8_t arb_session_active_cb(void) { return app_control_session_active(); }
+static void arb_broadcast_cb(const char *msg)
+{   /* 仲裁广播: 必须到达指挥权方 (send_to_owner 内做编号换算) */
+    app_tx_send_to_owner(msg, (int)strlen(msg));
+}
 static void link_ppr_set(uint8_t id, uint16_t ppr, void *ctx)
 {   /* E 命令在线改 PPR (编码器句柄属装配层) */
     (void)ctx;
@@ -335,6 +341,25 @@ bridge_ret_t app_wiring_load(void)
             .ctx            = NULL,
         };
         if (app_display_init(&disp_cfg, &disp_io) != BRIDGE_OK) return BRIDGE_ERR_IO;
+    }
+
+    /* ---- 指挥权仲裁初始化 (原 main.c init 块; 拆分时曾遗失 → 空指针广播死机) ----
+     * alive_init: 双链路=未知(-1) 宽限观望; USB=0 判死(固定 UART); UART=0 判活(固定 USB) */
+    s_failed = "link_arbiter";
+    {
+        LinkArbCfg ac = {
+            .session_active = arb_session_active_cb,
+            .broadcast      = arb_broadcast_cb,
+            .boot_grace_ms  = 3000,
+        };
+#if !CAR_FEATURE_USB
+        const int8_t alive_init = 0;    /* 无 USB 链路 → 固定 UART */
+#elif !CAR_FEATURE_UART
+        const int8_t alive_init = 1;    /* 无 UART 链路 → 固定 USB */
+#else
+        const int8_t alive_init = -1;   /* 未知, 待主循环喂判别活 */
+#endif
+        link_arb_init(&ac, alive_init, HAL_GetTick());
     }
 
     /* ---- app_link 命令链宿主 + P1-8 收包 sink 注册 ---- */

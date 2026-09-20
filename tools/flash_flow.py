@@ -59,6 +59,10 @@ def probe(port):
         s.write(b"PING\n")
         time.sleep(0.6)
         r = s.read(100)
+    except Exception as e:
+        # 写/读超时 = 端口在但固件未就绪 (枚举中/固件挂) — 按未就绪继续等, 不崩 (2026-09-20 教训)
+        return False, ("写读超时: " + str(e)[:50])
+    try:
         if b"PONG" not in r:
             return False, "无 PONG（设备无响应，需拔插 USB）"
         # 顺带取仲裁状态与 ringbuf 溢出/OLED 失败计数不可远程读，仅报 owner
