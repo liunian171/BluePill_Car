@@ -26,6 +26,7 @@ extern "C" {
 /* ---- 配置 ---- */
 typedef struct {
     uint32_t disp_period_ms;      /* 页刷新节拍 (CAR_DISP_PERIOD_MS, 现 100) */
+    uint8_t  usb_enabled;         /* P3: USB 链路下线时页 7 不宣称在线 (恒 OFF) */
 } app_display_cfg_t;
 
 /* ---- 依赖注入（健康数据源; 组件数据不注入, 直读组件 getter） ---- */
@@ -34,6 +35,8 @@ typedef struct {
     uint8_t  (*usb_on)(void *ctx);         /* USB 链路在线 (app_tx) */
     uint16_t (*rx_overflow)(void *ctx);    /* ringbuf 溢出和 (app_link) */
     uint32_t (*uart_silence_s)(void *ctx); /* 距最近 UART 字节秒数 (app_link) */
+    int32_t  (*enc_count)(uint8_t id, void *ctx); /* 编码器读 (id 0/1; 页2) */
+    uint8_t  (*gray_read)(uint8_t idx, void *ctx); /* 5 路灰度 idx 0~4 (页3; P2-4 收敛点) */
     void *ctx;
 } app_display_io_t;
 

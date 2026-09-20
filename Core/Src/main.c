@@ -20,7 +20,8 @@
 #include "usbd_cdc_if.h"
 #include "driver/link_arbiter.h"
 #include "app/app_tx.h"
-#include "app/app_control.h"          /* 50ms 控制节拍宿主 (2026-09-20 拆分) */                /* 发送出口/路由/编号换算 (2026-09-20 拆分) */
+#include "app/app_control.h"
+#include "app/app_display.h"           /* 100ms 显示节拍宿主 (2026-09-20 拆分) */          /* 50ms 控制节拍宿主 (2026-09-20 拆分) */                /* 发送出口/路由/编号换算 (2026-09-20 拆分) */
 #include "driver/pwm.h"
 #include "driver/uart.h"
 #include "driver/uart_platform_ops.h"
@@ -181,7 +182,7 @@ static speed_loop_cfg_t g_spd_cfg = {
     }
 };
 
-static char         s_last_cmd[20]  = "NONE";  /* 最近执行的命令 (OLED 页6 显示) */static char         s_last_resp[20] = "-";     /* 最近应答/回复 (OLED 页4 显示) */
+/* 页4/页6 数据源已迁 app_display (note_cmd/note_resp 喂数) */
 
 /* ==== [app_control 拆分 2026-09-20] 调参/IMU 工具链/上位机上报/WD 的状态与
  * 50ms 执行体已迁往 Core/Src/app/app_control.c —— 本文件仅保留:
@@ -307,6 +308,35 @@ static void ctl_send_line(const char *s, void *ctx) { (void)ctx; tx_raw(s, (int)
 static void ctl_note_cmd(const char *s, void *ctx)  { (void)ctx; cmd_note("%s", s); }
 static void ctl_resp(const char *s, void *ctx)      { (void)ctx; ack("%s", s); }
 static void ctl_delay_ms(uint32_t ms, void *ctx)    { (void)ctx; HAL_Delay(ms); }
+static const char *disp_owner_str(void *ctx)        { (void)ctx; return app_tx_owner_str(); }
+static uint8_t  disp_usb_on(void *ctx)              { (void)ctx; return app_tx_usb_on(); }
+static uint16_t disp_rx_overflow(void *ctx)
+{
+    (void)ctx;
+    /* [P3] 禁用链路的 ringbuf 无人消费, 溢出计数不计入 (与 P2 行为一致) */
+    uint16_t ovf = (uint16_t)ringbuf_overflow(&g_ringbuf_uart);
+#if LINK_USB_ENABLED
+    ovf = (uint16_t)(ovf + ringbuf_overflow(&g_ringbuf_usb));
+#endif
+    return ovf;
+}
+static uint32_t disp_uart_silence_s(void *ctx)
+{
+    (void)ctx;
+    if (!g_uart_seen) return 0xFFFFFFFFu;   /* 从未收到 (页7 显 "-") */
+    return (HAL_GetTick() - g_last_uart_rx_tick) / 1000;
+}
+static uint8_t disp_gray_read(uint8_t idx, void *ctx)
+{   /* [P2-4 收敛点] 页 3 灰度读经此注入, main.c 直读 HAL 收敛到唯一一处 */
+    (void)ctx;
+    static const uint32_t ports[5] = {
+        (uint32_t)OUT1_GPIO_Port, (uint32_t)OUT2_GPIO_Port, (uint32_t)OUT3_GPIO_Port,
+        (uint32_t)OUT4_GPIO_Port, (uint32_t)OUT5_GPIO_Port };
+    static const uint16_t pins[5] = {
+        OUT1_Pin, OUT2_Pin, OUT3_Pin, OUT4_Pin, OUT5_Pin };
+    if (idx > 4) return 0;
+    return (uint8_t)HAL_GPIO_ReadPin((GPIO_TypeDef *)ports[idx], pins[idx]);
+}
 
 /* 裸发送: 不记录 OLED 应答页 (寻迹诊断等高频事件用) */
 static void tx_raw(const char *buf, int n)
@@ -324,10 +354,7 @@ static void ack(const char *fmt, ...)
     va_end(ap);
     if (n > 0) {
         tx_raw(buf, n);
-        /* 手动截断复制, 消除 -Wformat-truncation (截断是预期行为) */
-        size_t rn = ((size_t)n < sizeof(s_last_resp) - 1) ? (size_t)n : sizeof(s_last_resp) - 1;
-        memcpy(s_last_resp, buf, rn);
-        s_last_resp[rn] = '\0';
+        app_display_note_resp(buf, NULL);   /* [app_display 拆分] 页4 喂数 (截断在模块内) */
     }
 }
 
@@ -375,19 +402,15 @@ static void steering_output_to_servo(uint8_t id, float phys_angle)
 /* 记录最近执行的命令, OLED 页6 显示, 用于无线命令执行确认 */
 static void cmd_note(const char *fmt, ...)
 {
+    char buf[24];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(s_last_cmd, sizeof(s_last_cmd), fmt, ap);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    app_display_note_cmd(buf, NULL);   /* [app_display 拆分] 页6 喂数 (截断在模块内) */
 }
 
-/* OLED 整行写入: 补齐/截断到 21 字符, 定宽覆盖无残留, 无需先清屏 */
-static void oled_line(uint8_t page, const char *s)
-{
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%-21.21s", s);
-    oled_bridge_show_line_small(page, buf);
-}
+/* [app_display 拆分] oled_line 已随页组版迁往 app_display.c */
 /* USER CODE END 0 */
 
 /**
@@ -490,6 +513,24 @@ int main(void)
         if (app_control_init(&ctl_cfg, &ctl_io) != BRIDGE_OK) Error_Handler();
     }
 
+    /* ---- [app_display 拆分 2026-09-20] 100ms 显示节拍宿主: io 绑定注入 ---- */
+    {
+        app_display_cfg_t disp_cfg = {
+            .disp_period_ms = CAR_DISP_PERIOD_MS,
+            .usb_enabled    = LINK_USB_ENABLED,   /* P3: 下线时页 7 不宣称在线 */
+        };
+        app_display_io_t disp_io = {
+            .owner_str     = disp_owner_str,
+            .usb_on        = disp_usb_on,
+            .rx_overflow   = disp_rx_overflow,
+            .uart_silence_s = disp_uart_silence_s,
+            .enc_count     = ctl_enc_count,       /* 复用 app_control 的编码器绑定 */
+            .gray_read     = disp_gray_read,
+            .ctx           = NULL,
+        };
+        if (app_display_init(&disp_cfg, &disp_io) != BRIDGE_OK) Error_Handler();
+    }
+
     /* ---- [P2 双链路仲裁] 上电 usb_alive 初值 ----
      * 双链路: 未知(-1), 枚举异步完成, 由宽限期逻辑兜底 (超时不活 → 自动切 UART)
      * [P3] USB=0 → 直接判死(0) = 仲裁固定走 UART; UART=0 → 直接判活(1) = 固定走 USB。
@@ -582,7 +623,7 @@ int main(void)
   uint8_t  f_len[LINK_COUNT] = {0, 0};
   uint8_t  in_frame[LINK_COUNT] = {0, 0};
   uint32_t t_frame[LINK_COUNT] = {0, 0};
-  uint32_t t_disp = 0;
+  uint32_t t_auto = 0;    /* 巡线自动启动仲裁门 (100ms, 与显示同拍) */
 
   while (1)
   {
@@ -940,110 +981,16 @@ int main(void)
          * [OLED 分页轮转] 每 100ms 只刷 1 页 (8 页 800ms 轮完) — I2C2 异常时每页
          * ~10ms 超时, 8 页连刷曾阻塞主循环 ~850ms/圈 → 控制环掉到 1Hz (2026-09-13
          * 调参实验实测踩坑, 见调试总结 §14 优化方向); 分页后最坏阻塞 ≤1 页 */
-        if (now - t_disp >= CAR_DISP_PERIOD_MS) {
-            t_disp = HAL_GetTick();
-
-            /* 读传感器 (IMU 已在 ③b 独立节拍更新, 此处只取缓存值刷新显示) */
-            float roll  = imu_bridge_get_roll(0);
-            float pitch = imu_bridge_get_pitch(0);
-            float yaw   = imu_bridge_get_yaw(0);
-            int32_t enc1 = encoder_get_count(&henc1);
-            int32_t enc2 = encoder_get_count(&henc2);
-
-            /* 拆分 float → int.dec */
-            int ri=(int)roll,  rd=(int)((roll -ri)*10.0f); if(rd<0)rd=-rd;
-            int pi=(int)pitch, pd=(int)((pitch-pi)*10.0f); if(pd<0)pd=-pd;
-            int yi=(int)yaw,   yd=(int)((yaw  -yi)*10.0f); if(yd<0)yd=-yd;
+        /* ③ → app_display (2026-09-20 拆分): 8 页组版/健康呈现/熔断呈现已迁往
+         * Core/Src/app/app_display.c (节拍门内聚)。组装层仅保留"IMU 校准完成
+         * 自动启动巡线"——这是接管权仲裁 (脑干职责), 不进显示模块 */
+        if (now - t_auto >= CAR_DISP_PERIOD_MS) {
+            t_auto = now;
             uint8_t prog = imu_bridge_cal_progress(0);
-
-            /* IMU 校准完成后自动启动寻迹 */
             line_follower_try_auto_start(prog >= 100, now);
-
-            /* OLED 分页轮转: 单页单事务写入, 定宽补齐无残留, 免清屏 */
-            char b[32];   /* 32B: 页7 链路行最长 ~29B (E/O 计数为多位时), 留足避免截断告警 */
-            static uint8_t s_disp_page = 0;
-            switch (s_disp_page) {
-            case 0: /* IMU 欧拉角 */
-                snprintf(b,26,"R:%d.%d P:%d.%d Y:%d.%d",ri,rd,pi,pd,yi,yd);
-                oled_line(0,b); break;
-            case 1: { /* 速度环 实际->目标 (带符号, 由执行组件状态读出) */
-                speed_loop_state_t s0, s1;
-                speed_loop_get_state(0, &s0); speed_loop_get_state(1, &s1);
-                snprintf(b,26,"M0:%d->%d  M1:%d->%d",
-                         spd_to_int(s0.actual_rpm), (int)s0.target_rpm,
-                         spd_to_int(s1.actual_rpm), (int)s1.target_rpm);
-                oled_line(1,b); break;
-            }
-            case 2: /* 编码器计数（标定转弯/直行距离用） */
-                snprintf(b,26,"ENC0:%d  ENC1:%d", (int)enc1, (int)enc2);
-                oled_line(2,b); break;
-            case 3: { /* 灰度 + IMU 状态 */
-                uint8_t g1=HAL_GPIO_ReadPin(OUT1_GPIO_Port,OUT1_Pin);
-                uint8_t g2=HAL_GPIO_ReadPin(OUT2_GPIO_Port,OUT2_Pin);
-                uint8_t g3=HAL_GPIO_ReadPin(OUT3_GPIO_Port,OUT3_Pin);
-                uint8_t g4=HAL_GPIO_ReadPin(OUT4_GPIO_Port,OUT4_Pin);
-                uint8_t g5=HAL_GPIO_ReadPin(OUT5_GPIO_Port,OUT5_Pin);
-                snprintf(b,26,"G:%d%d%d%d%d  %s",
-                         g1?1:0,g2?1:0,g3?1:0,g4?1:0,g5?1:0, (prog<100)?"CAL":"OK");
-                oled_line(3,b); break;
-            }
-            case 4: /* 最近应答 (指令接收后的回复, 无线调试确认) */
-                snprintf(b,26,"RSP:%-17s", s_last_resp);
-                oled_line(4,b); break;
-            case 5: { /* PID 参数 M0/M1 (合并一行, 腾出命令显示页); 真值从组件读, ×100 显示 */
-                float kp[2], ki[2], kd[2];
-                speed_loop_get_gains(0, &kp[0], &ki[0], &kd[0]);
-                speed_loop_get_gains(1, &kp[1], &ki[1], &kd[1]);
-                snprintf(b,26,"P%d,%d I%d,%d D%d,%d",
-                         spd_to_int(kp[0]*100.0f), spd_to_int(kp[1]*100.0f),
-                         spd_to_int(ki[0]*100.0f), spd_to_int(ki[1]*100.0f),
-                         spd_to_int(kd[0]*100.0f), spd_to_int(kd[1]*100.0f));
-                oled_line(5,b); break;
-            }
-            case 6: /* 最近执行的命令 (无线命令执行确认) */
-                snprintf(b,26,"CMD:%-16s", s_last_cmd);
-                oled_line(6,b); break;
-            default: /* 页7: 链路状态 + 健康计数 (2026-09-19 节拍拉长专案: **失败必须可见**;
-                      * 原巡线状态页已编译期剔除, 恢复巡线时从 git 找回另开显示页)
-                      * 字段: L=owner / USB:ON|OFF 或 E=OLED写失败累计 O=ringbuf溢出累计
-                      *       / 末列 = UART 静默秒数 或 FZ=OLED 已熔断停刷 */
-            {
-                /* USB: 枚举+配置完成即 ON (DTR 级判活 P2 落地后细化为"应用已打开")
-                 * UART: MCU 无法感知 SPP 连接态, 显示距最近收字节的秒数 (从未收过显 "-")
-                 * [P3] USB 链路编译期下线时不宣称在线 (恒 OFF), 免得与实测矛盾 */
-#if LINK_USB_ENABLED
-                uint8_t usb_on = app_tx_usb_on();   /* [app_tx 拆分] 状态读出收口 */
-#else
-                uint8_t usb_on = 0;
-#endif
-                char us[10];
-                if (g_uart_seen)
-                    snprintf(us, sizeof(us), "%lus",
-                             (unsigned long)((HAL_GetTick() - g_last_uart_rx_tick) / 1000));
-                else
-                    snprintf(us, sizeof(us), "-");
-
-                uint16_t oled_e = oled_bridge_tx_fail_count();
-                /* [P3] 禁用链路的 ringbuf 无人消费, 其溢出计数不代表"丢过有用数据"
-                 * → 不计入总数 (双链路全开时两者都算, 与 P2 行为一致) */
-                uint16_t rb_ovf = (uint16_t)ringbuf_overflow(&g_ringbuf_uart);
-#if LINK_USB_ENABLED
-                rb_ovf = (uint16_t)(rb_ovf + ringbuf_overflow(&g_ringbuf_usb));
-#endif
-                if (oled_e || rb_ovf)     /* 有异常才挤掉 USB 状态字段, 正常态保持原版式 */
-                    snprintf(b,sizeof(b),"L:%s E%d O%d %s",
-                             app_tx_owner_str(),
-                             (int)oled_e, (int)rb_ovf,
-                             oled_bridge_fused() ? "FZ" : us);
-                else
-                    snprintf(b,sizeof(b),"L:%s USB:%s U:%s",
-                             app_tx_owner_str(),
-                             usb_on ? "ON" : "OFF", us);
-                oled_line(7,b); break;
-            }
-            }
-            s_disp_page = (s_disp_page + 1) & 7;
-        }  }
+        }
+        app_display_task(now);
+    }   /* while(1) 收尾 (原与显示门同行的右括号, 拆分后显式独立) */
   /* USER CODE END 3 */
 }
 
