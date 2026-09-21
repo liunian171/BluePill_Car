@@ -44,7 +44,7 @@
 
 #include <stdint.h>
 
-/* ---- 返回码（错误通道；模块内保持一致）---- */
+/* ---- 返回码（错误通道；取值顺序对齐 bridge_ret 家族: OK=0 优先, 其后依次为错误）---- */
 typedef enum {
     STEERING_OK          = 0,   /* 调用成功 */
     STEERING_ERR_NOT_INIT = 1,  /* 组件未初始化 */

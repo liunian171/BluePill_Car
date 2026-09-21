@@ -50,7 +50,7 @@
 /* ---- 编码器通道数（本车 2；与 speed_loop/SPEED_LOOP_MAX_CH 对齐留裕量）---- */
 #define ODOM_MAX_ENC            2
 
-/* ---- 返回码（错误通道；模块内保持一致）---- */
+/* ---- 返回码（错误通道；取值顺序对齐 bridge_ret 家族: OK=0 优先, 其后依次为错误）---- */
 typedef enum {
     ODOM_OK           = 0,   /* 调用成功（含 resync 后首帧的零增量） */
     ODOM_ERR_NOT_INIT = 1,   /* 组件未初始化 */

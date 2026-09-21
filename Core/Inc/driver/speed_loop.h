@@ -57,7 +57,7 @@
 /* ---- 停车语义阈值：|目标| < 此值视为"0 速"（沿用原 main.c `spd_target < 1.0f`）---- */
 #define SPEED_LOOP_MIN_RUN_RPM   1.0f
 
-/* ---- 返回码（错误通道；模块内保持一致）---- */
+/* ---- 返回码（错误通道；取值顺序对齐 bridge_ret 家族: OK=0 优先, 其后依次为错误）---- */
 typedef enum {
     SPEED_LOOP_OK           = 0,   /* 调用成功 */
     SPEED_LOOP_ERR_NOT_INIT = 1,   /* 组件未初始化 */
