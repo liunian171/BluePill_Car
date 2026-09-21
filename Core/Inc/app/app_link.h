@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include "driver/bridge_ret.h"
 #include "app/app_iface.h"
+#include "app/cmd_exec.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +43,9 @@ typedef struct {
     void (*wd_feed)(void *ctx);                    /* owner 链路字节喂狗 (app_control) */
     uint8_t (*session_active)(void *ctx);          /* 调参会话判据 (app_control) */
     void (*ppr_set)(uint8_t id, uint16_t ppr, void *ctx); /* E 命令在线改 PPR (绑编码器句柄) */
+    cmd_exec_io_t  cmd;                            /* [R2] 命令执行的组件/桥/宿主注入面
+                                                      (send/note/override/wd/ppr 与上重复填,
+                                                      wiring 一次注入, app_link 透传给 cmd_exec) */
     void *ctx;
 } app_link_io_t;
 

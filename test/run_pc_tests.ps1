@@ -9,7 +9,7 @@ if (-not (Get-Command $gcc -ErrorAction SilentlyContinue)) {
 }
 
 New-Item -ItemType Directory -Force -Path build | Out-Null
-$incs = @("-I", "Core/Inc", "-I", "Core/Inc/driver", "-I", "Core/Inc/common")
+$incs = @("-I", "Core/Inc", "-I", "Core/Inc/app", "-I", "Core/Inc/driver", "-I", "Core/Inc/common")
 
 $failed = 0
 
@@ -18,6 +18,14 @@ Write-Host "== 编译+运行: txt_cmd 测试桩 =="
     test/host_txt_cmd_test.c Core/Src/driver/txt_cmd.c
 if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
 & build\pc_test_txt_cmd.exe
+if ($LASTEXITCODE -ne 0) { $failed++ }
+
+Write-Host ""
+Write-Host "== 编译+运行: cmd_exec 命令执行器测试桩 (R2) =="
+& $gcc -Wall -Wextra @incs -o build/pc_test_cmd_exec.exe `
+    test/host_cmd_exec_test.c Core/Src/app/cmd_exec.c
+if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
+& build\pc_test_cmd_exec.exe
 if ($LASTEXITCODE -ne 0) { $failed++ }
 
 Write-Host ""

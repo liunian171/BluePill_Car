@@ -225,6 +225,115 @@ static void link_ppr_set(uint8_t id, uint16_t ppr, void *ctx)
     if (id == 0) henc1.ppr = ppr; else henc2.ppr = ppr;
 }
 
+/* ════════ R2: cmd_exec 注入面 glue（组件/桥/宿主 → cmd_exec 回调签名适配）════════
+ * 组件函数签名无 ctx 指针, cmd_exec 回调带 ctx → 各写一个薄适配器转发。
+ * (与 app_control io 绑定的组件直调同源, 此处为命令执行专属路径)。 */
+
+/* --- speed_loop 适配 --- */
+static speed_loop_ret_t cmd_spd_stop(uint8_t id, void *ctx){ (void)ctx; return speed_loop_stop(id); }
+static speed_loop_ret_t cmd_spd_tgt(uint8_t id, float rpm, void *ctx){ (void)ctx; return speed_loop_set_target(id, rpm); }
+static speed_loop_ret_t cmd_spd_setg(uint8_t id, float kp,float ki,float kd, void *ctx){ (void)ctx; return speed_loop_set_gains(id,kp,ki,kd); }
+static speed_loop_ret_t cmd_spd_getg(uint8_t id, float *kp,float *ki,float *kd, void *ctx){ (void)ctx; return speed_loop_get_gains(id,kp,ki,kd); }
+static speed_loop_ret_t cmd_spd_ff(uint8_t id, float gain, void *ctx){ (void)ctx; return speed_loop_set_ff_gain(id, gain); }
+
+/* --- line_follower 适配 --- */
+static void cmd_line_en(uint8_t en, void *ctx){ (void)ctx; line_follower_enable(en); }
+static void cmd_line_auto(uint8_t v, void *ctx){ (void)ctx; line_follower_set_auto(v); }
+static void cmd_line_kp(float v, void *ctx){ (void)ctx; line_follower_set_kp(v); }
+static void cmd_line_kd(float v, void *ctx){ (void)ctx; line_follower_set_kd(v); }
+static void cmd_line_spd(float v, void *ctx){ (void)ctx; line_follower_set_speed(v); }
+static void cmd_line_inv(void *ctx){ (void)ctx; line_follower_invert(); }
+static int8_t cmd_line_inverted(void *ctx){ (void)ctx; return line_follower_inverted(); }
+static void cmd_line_scnt(int32_t v, void *ctx){ (void)ctx; line_follower_set_straight_cnt(v); }
+static void cmd_line_tcnt(int32_t v, void *ctx){ (void)ctx; line_follower_set_turn_cnt(v); }
+
+/* --- steering 适配 --- */
+static steering_ret_t cmd_steer_set(float v, void *ctx){ (void)ctx; return steering_set(v); }
+static float cmd_steer_get(void *ctx){ (void)ctx; return steering_get(); }
+static steering_ret_t cmd_steer_nudge(float d, void *ctx){ (void)ctx; return steering_nudge(d); }
+static steering_ret_t cmd_steer_lmin(float v, void *ctx){ (void)ctx; return steering_set_limit_min(v); }
+static steering_ret_t cmd_steer_lmax(float v, void *ctx){ (void)ctx; return steering_set_limit_max(v); }
+static steering_ret_t cmd_steer_ctr(float v, void *ctx){ (void)ctx; return steering_set_center(v); }
+static steering_ret_t cmd_steer_center(void *ctx){ (void)ctx; return steering_center(); }
+
+/* --- app_control 适配 (STEP/TEL/REC/DUMP/ODOM/WD/ITEL/IRATE/STOP) --- */
+static void cmd_ctl_stopall(void *ctx){ (void)ctx; app_control_stop_all(); }
+static bridge_ret_t cmd_ctl_step(uint8_t id,int16_t rate,uint32_t dur,uint8_t div,uint32_t now, void *ctx){
+    (void)ctx; return app_control_step_start(id, rate, dur, div, now); }
+static void cmd_ctl_tel(uint8_t v, void *ctx){ (void)ctx; app_control_tel_set(v); }
+static void cmd_ctl_rec(uint8_t v, void *ctx){ (void)ctx; app_control_rec_set(v); }
+static void cmd_ctl_dump(void *ctx){ (void)ctx; app_control_rec_dump(); }
+static void cmd_ctl_odom(uint8_t v, void *ctx){ (void)ctx; app_control_odom_set(v); }
+static bridge_ret_t cmd_ctl_wd(uint32_t ms, void *ctx){ (void)ctx; return app_control_wd_set(ms); }
+static bridge_ret_t cmd_ctl_itel(uint8_t m, void *ctx){ (void)ctx; return app_control_itel_set(m); }
+static bridge_ret_t cmd_ctl_irate(uint16_t ms, void *ctx){ (void)ctx; return app_control_imu_rate_set(ms); }
+
+/* --- imu_bridge 适配 --- */
+static bridge_ret_t cmd_imu_mahony(uint8_t id,float kp,float ki, void *ctx){ (void)ctx; return imu_bridge_set_mahony_gains(id,kp,ki); }
+static bridge_ret_t cmd_imu_drift(uint8_t id,uint8_t en, void *ctx){ (void)ctx; return imu_bridge_set_drift_enable(id,en); }
+static bridge_ret_t cmd_imu_recal(uint8_t id, void *ctx){ (void)ctx; return imu_bridge_recalibrate(id); }
+
+/* --- motor_bridge 适配 --- */
+static bridge_ret_t cmd_mtr_mps(uint8_t id,float mps, void *ctx){ (void)ctx; return motor_bridge_set_speed_mps(id,mps); }
+static bridge_ret_t cmd_mtr_rate(uint8_t id,int16_t rate, void *ctx){ (void)ctx; return motor_bridge_set_rate_0E3(id,rate); }
+
+/* --- link_arbiter 适配 --- */
+static LinkArbRet cmd_arb_req(LinkArbOwner t, void *ctx){ (void)ctx; return link_arb_request(t); }
+static LinkArbOwner cmd_arb_owner(void *ctx){ (void)ctx; return link_arb_owner(); }
+
+/* 填充 app_link io 的命令执行注入面（R2） */
+static void link_fill_cmd_io(app_link_io_t *io)
+{
+    cmd_exec_io_t *c = &io->cmd;
+    memset(c, 0, sizeof(*c));
+    c->send            = io->sink.send;
+    c->note_cmd        = io->page_note.note_cmd;
+    c->note_resp       = io->page_note.note_resp;
+    c->override_manual = io->override_manual;
+    c->wd_feed         = io->wd_feed;
+    c->ppr_set         = io->ppr_set;
+    c->uart_enabled    = (uint8_t)CAR_FEATURE_UART;
+    c->usb_enabled     = (uint8_t)CAR_FEATURE_USB;
+    c->spd_stop        = cmd_spd_stop;
+    c->spd_set_target  = cmd_spd_tgt;
+    c->spd_set_gains   = cmd_spd_setg;
+    c->spd_get_gains   = cmd_spd_getg;
+    c->spd_set_ff_gain = cmd_spd_ff;
+    c->line_enable     = cmd_line_en;
+    c->line_set_auto   = cmd_line_auto;
+    c->line_set_kp     = cmd_line_kp;
+    c->line_set_kd     = cmd_line_kd;
+    c->line_set_speed  = cmd_line_spd;
+    c->line_invert     = cmd_line_inv;
+    c->line_inverted   = cmd_line_inverted;
+    c->line_set_straight_cnt = cmd_line_scnt;
+    c->line_set_turn_cnt     = cmd_line_tcnt;
+    c->steer_set       = cmd_steer_set;
+    c->steer_get       = cmd_steer_get;
+    c->steer_nudge     = cmd_steer_nudge;
+    c->steer_set_limit_min = cmd_steer_lmin;
+    c->steer_set_limit_max = cmd_steer_lmax;
+    c->steer_set_center = cmd_steer_ctr;
+    c->steer_center    = cmd_steer_center;
+    c->ctl_stop_all    = cmd_ctl_stopall;
+    c->ctl_step_start  = cmd_ctl_step;
+    c->ctl_tel_set     = cmd_ctl_tel;
+    c->ctl_rec_set     = cmd_ctl_rec;
+    c->ctl_rec_dump    = cmd_ctl_dump;
+    c->ctl_odom_set    = cmd_ctl_odom;
+    c->ctl_wd_set      = cmd_ctl_wd;
+    c->ctl_itel_set    = cmd_ctl_itel;
+    c->ctl_imu_rate_set= cmd_ctl_irate;
+    c->imu_set_mahony_gains  = cmd_imu_mahony;
+    c->imu_set_drift_enable  = cmd_imu_drift;
+    c->imu_recalibrate       = cmd_imu_recal;
+    c->mtr_set_speed_mps     = cmd_mtr_mps;
+    c->mtr_set_rate_0E3      = cmd_mtr_rate;
+    c->arb_request    = cmd_arb_req;
+    c->arb_owner      = cmd_arb_owner;
+    c->ctx = io->ctx;
+}
+
 /* ---- init 失败定位 ---- */
 static const char *s_failed = "";
 
@@ -386,6 +495,7 @@ bridge_ret_t app_wiring_load(void)
             .ppr_set         = link_ppr_set,
             .ctx             = NULL,
         };
+        link_fill_cmd_io(&link_io);   /* [R2] 命令执行注入面 */
         if (app_link_init(&link_cfg, &link_io) != BRIDGE_OK) return BRIDGE_ERR_IO;
         usbd_cdc_if_register_rx_sink(app_link_usb_rx_isr);   /* [P1-8] */
     }
