@@ -77,11 +77,19 @@ if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
 if ($LASTEXITCODE -ne 0) { $failed++ }
 
 Write-Host ""
-Write-Host "== 编译+运行: ringbuf 通用算法层测试桩 (容量/溢出可见性) =="
+Write-Host "== 编译+运行: ringbuf 通用算法层测试桩 (容量/溢出可见性/peek-commit) =="
 & $gcc -Wall -Wextra @incs -o build/pc_test_ringbuf.exe `
     test/host_ringbuf_test.c Core/Src/common/ringbuf.c
 if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
 & build\pc_test_ringbuf.exe
+if ($LASTEXITCODE -ne 0) { $failed++ }
+
+Write-Host ""
+Write-Host "== 编译+运行: tx_stream 发送流核心测试桩 (R3 分段发送) =="
+& $gcc -Wall -Wextra @incs -o build/pc_test_tx_stream.exe `
+    test/host_tx_stream_test.c Core/Src/common/tx_stream.c Core/Src/common/ringbuf.c
+if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
+& build\pc_test_tx_stream.exe
 if ($LASTEXITCODE -ne 0) { $failed++ }
 
 Write-Host ""

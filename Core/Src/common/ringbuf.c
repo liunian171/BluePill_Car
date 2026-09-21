@@ -90,3 +90,34 @@ uint8_t ringbuf_overflow(RingBuffer *rb)
 {
     return rb->overflow;
 }
+
+
+/*==============================================================================
+ *  ringbuf_peek — 窥视拷贝（不推进 tail）
+ *  从当前 tail 起拷贝最多 max 个未读字节到 dst；可跨越缓冲末尾回绕。
+ *  ⚠️ 调用方视角是"读"tail 区间：须保证本函数执行期间 tail 不被其它消费者推进
+ *     （tx_stream 内与 ringbuf_commit 配对使用，均在任务上下文，安全）。
+ *==============================================================================*/
+uint16_t ringbuf_peek(RingBuffer *rb, uint8_t *dst, uint16_t max)
+{
+    uint16_t avail = (uint16_t)ringbuf_num_available(rb);
+    if (max > avail) max = avail;
+    uint16_t tail = rb->tail;
+    for (uint16_t i = 0; i < max; i++) {
+        dst[i] = rb->buf[tail];
+        tail = (tail + 1) % RINGBUF_SIZE;
+    }
+    return max;
+}
+
+
+/*==============================================================================
+ *  ringbuf_commit — 按 n 字节推进 tail（消费已窥视的数据）
+ *  调用方必须保证 n ≤ ringbuf_num_available（否则 tail 越过 head，缓冲损坏）。
+ *==============================================================================*/
+void ringbuf_commit(RingBuffer *rb, uint16_t n)
+{
+    uint16_t avail = (uint16_t)ringbuf_num_available(rb);
+    if (n > avail) n = avail;
+    rb->tail = (rb->tail + n) % RINGBUF_SIZE;
+}

@@ -43,7 +43,6 @@ typedef struct {
                                                      ⚠️ len 必须显式给: ODOM/ATT 为含 0x00 的二进制帧, 严禁 strlen */
     void (*note_cmd)(const char *s, void *ctx);   /* 页6 命令记录 (cmd_note 等价) */
     void (*resp)(const char *s, void *ctx);       /* 应答+页4 (ack 等价) */
-    void (*delay_ms)(uint32_t ms, void *ctx);     /* 阻塞延时 (DUMP 重放用; 绑 HAL_Delay) */
     void *ctx;
 } app_control_io_t;
 

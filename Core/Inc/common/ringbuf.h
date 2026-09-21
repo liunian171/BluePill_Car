@@ -89,4 +89,13 @@ uint16_t ringbuf_num_available(RingBuffer *rb);
  *  ▸ 用途：丢过数据必须可见（设计文档 §3.3 契约）；显示于 OLED 页 7 */
 uint8_t  ringbuf_overflow(RingBuffer *rb);
 
+/** @brief 窥视拷贝 — 把最多 max 个未读字节拷到 dst，**不推进 tail**（不消费）。
+ *  返回实际拷贝字节数。供"需确认成功才弹出"的分段发送预取（对齐 tx_stream）。
+ *  ▸ R3 新增（2026-09-21）：多生产者/多消费者契约不变，仅读 tail 区间。 */
+uint16_t ringbuf_peek(RingBuffer *rb, uint8_t *dst, uint16_t max);
+
+/** @brief 按 n 字节推进 tail（消费）。调用方须保证 n ≤ ringbuf_num_available。
+ *  供 ringbuf_peek 后"确认成功再提交"的分段发送（对齐 tx_stream）。 */
+void     ringbuf_commit(RingBuffer *rb, uint16_t n);
+
 #endif /* __RINGBUF_H__ */

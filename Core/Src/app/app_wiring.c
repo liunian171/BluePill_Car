@@ -183,11 +183,16 @@ static void ctl_resp(const char *s, void *ctx)
     app_tx_send_by_link(app_tx_active(), s, (int)strlen(s));
     app_display_note_resp(s, NULL);
 }
-static void ctl_delay_ms(uint32_t ms, void *ctx)    { (void)ctx; HAL_Delay(ms); }
 
 static const char *disp_owner_str(void *ctx)        { (void)ctx; return app_tx_owner_str(); }
 static uint8_t  disp_usb_on(void *ctx)              { (void)ctx; return app_tx_usb_on(); }
 static uint16_t disp_rx_overflow(void *ctx)         { (void)ctx; return app_link_rx_overflow(); }
+static uint16_t disp_tx_trouble(void *ctx)          { (void)ctx;
+    app_tx_stats_t su, ss;
+    app_tx_get_stats(APP_LINK_UART, &su);
+    app_tx_get_stats(APP_LINK_USB,  &ss);
+    return (uint16_t)(su.drop + su.txerr + ss.drop + ss.txerr);
+}
 static uint32_t disp_uart_silence_s(void *ctx)      { (void)ctx; return app_link_uart_silence_s(); }
 static uint8_t disp_gray_read(uint8_t idx, void *ctx)
 {   /* [P2-4 收敛点] 页 3 灰度读唯一 HAL 直读处 (原 main.c 与 line_follower 各一份) */
@@ -403,8 +408,6 @@ bridge_ret_t app_wiring_load(void)
         app_tx_cfg_t tx_cfg = {
             .uart_enabled          = CAR_FEATURE_UART,
             .usb_enabled           = CAR_FEATURE_USB,
-            .usb_busy_timeout_ms   = 10,     /* 原直调口径 */
-            .uart_block_timeout_ms = 100,
         };
         if (app_tx_init(&tx_cfg) != BRIDGE_OK) return BRIDGE_ERR_IO;
     }
@@ -426,7 +429,6 @@ bridge_ret_t app_wiring_load(void)
             .send_line    = ctl_send_line,
             .note_cmd     = ctl_note_cmd,
             .resp         = ctl_resp,
-            .delay_ms     = ctl_delay_ms,
             .ctx          = NULL,
         };
         if (app_control_init(&ctl_cfg, &ctl_io) != BRIDGE_OK) return BRIDGE_ERR_IO;
@@ -443,6 +445,7 @@ bridge_ret_t app_wiring_load(void)
             .owner_str      = disp_owner_str,
             .usb_on         = disp_usb_on,
             .rx_overflow    = disp_rx_overflow,
+            .tx_trouble     = disp_tx_trouble,
             .uart_silence_s = disp_uart_silence_s,
             .enc_count      = ctl_enc_count,     /* 复用编码器绑定 */
             .gray_read      = disp_gray_read,

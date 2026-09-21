@@ -115,6 +115,9 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 
 /* USER CODE BEGIN EXPORTED_FUNCTIONS */
 
+/* [R3 发送路径专项] USB IN 端点可收新段判据（TxState==0）。供 app_tx 发送流 free() 门控。 */
+uint8_t CDC_IsTxFree(void);
+
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**

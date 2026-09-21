@@ -34,6 +34,7 @@ typedef struct {
     const char *(*owner_str)(void *ctx);   /* "USB"/"UART" (app_tx) */
     uint8_t  (*usb_on)(void *ctx);         /* USB 链路在线 (app_tx) */
     uint16_t (*rx_overflow)(void *ctx);    /* ringbuf 溢出和 (app_link) */
+    uint16_t (*tx_trouble)(void *ctx);     /* TX 发送丢弃+错误合计 (app_tx; R3 沉默失败必可见) */
     uint32_t (*uart_silence_s)(void *ctx); /* 距最近 UART 字节秒数 (app_link) */
     int32_t  (*enc_count)(uint8_t id, void *ctx); /* 编码器读 (id 0/1; 页2) */
     uint8_t  (*gray_read)(uint8_t idx, void *ctx); /* 5 路灰度 idx 0~4 (页3; P2-4 收敛点) */

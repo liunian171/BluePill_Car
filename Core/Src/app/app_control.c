@@ -52,6 +52,9 @@ static uint16_t g_rec_cnt = 0;
 static uint32_t g_rec_tick[REC_MAX_CAP];
 static int16_t  g_rec_t0[REC_MAX_CAP], g_rec_r0[REC_MAX_CAP];
 static int16_t  g_rec_t1[REC_MAX_CAP], g_rec_r1[REC_MAX_CAP];
+/* [R3] 记录重放流式状态机（非阻塞; 每控制节拍吐 1 行, 不再 delay_ms 阻塞） */
+static uint8_t  g_dump_active = 0;
+static uint16_t g_dump_idx    = 0;
 
 /* IMU 更新 / ITEL */
 static uint16_t g_imu_period_ms = 100;
@@ -84,8 +87,7 @@ bridge_ret_t app_control_init(const app_control_cfg_t *cfg, const app_control_io
     if (cfg == NULL || io == NULL) return BRIDGE_ERR_BAD_ARG;
     if (cfg->ctrl_period_ms == 0)  return BRIDGE_ERR_BAD_CFG;
     if (io->usb_alive == NULL || io->last_rx_tick == NULL || io->enc_count == NULL ||
-        io->send_line == NULL || io->note_cmd == NULL || io->resp == NULL ||
-        io->delay_ms == NULL)
+        io->send_line == NULL || io->note_cmd == NULL || io->resp == NULL)
         return BRIDGE_ERR_BAD_ARG;
     g_cfg = *cfg;
     g_io  = *io;
@@ -204,6 +206,25 @@ void app_control_task(uint32_t now)
                 g_rec_r1[g_rec_cnt] = (int16_t)fmt_spd_to_int(s1.actual_rpm);
                 g_rec_cnt++;
             }
+
+            /* ═══ 记录重放 (R3 非阻塞流式): 每控制节拍吐 1 行, 不挡主循环 ═══
+             * 9600 下 22B/行 = ~23ms, 50ms 节拍一口一个, 行间无需 20ms 延时；
+             * 鸣放末行后自动补 DUMP END + 页6 记录。 */
+            if (g_dump_active) {
+                if (g_dump_idx < g_rec_cnt) {
+                    uint16_t i = g_dump_idx;
+                    char tb[44];
+                    int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d\r\n",
+                                      (unsigned long)g_rec_tick[i],
+                                      g_rec_t0[i], g_rec_r0[i], g_rec_t1[i], g_rec_r1[i]);
+                    if (tn > 0) g_io.send_line(tb, tn, g_io.ctx);
+                    g_dump_idx++;
+                } else {
+                    g_io.resp("DUMP END\r\n", g_io.ctx);
+                    g_io.note_cmd("DUMP", g_io.ctx);
+                    g_dump_active = 0;
+                }
+            }
         }
     }
 
@@ -276,22 +297,14 @@ void app_control_rec_set(uint8_t on)  { g_rec_on = on ? 1 : 0; if (g_rec_on) g_r
 
 void app_control_rec_dump(void)
 {
-    /* 重放机内记录: 首行报条数, 末行报结束 — PC 端按条数校验补全
-     * [已知限制] 逐行 20ms 匀速发送 (~1.3s 阻塞主循环), 换 DMA 后可移除延时 */
+    /* [R3] 非阻塞流式重放: 只发头 + 置流式标志; 每控制节拍吐 1 行 (见 task 内
+     * "记录重放"块), 末行后自动发 DUMP END。不再逐行 delay_ms(20) 阻塞主循环。 */
     g_rec_on = 0;
-    char hb[20];
+    g_dump_active = 1;
+    g_dump_idx    = 0;
+    char hb[24];
     int hn = snprintf(hb, sizeof(hb), "DUMP %u\r\n", (unsigned)g_rec_cnt);
     if (hn > 0) g_io.resp(hb, g_io.ctx);
-    for (uint16_t i = 0; i < g_rec_cnt; i++) {
-        char tb[44];
-        int tn = snprintf(tb, sizeof(tb), "%lu,%d,%d,%d,%d\r\n",
-                          (unsigned long)g_rec_tick[i],
-                          g_rec_t0[i], g_rec_r0[i], g_rec_t1[i], g_rec_r1[i]);
-        if (tn > 0) g_io.send_line(tb, tn, g_io.ctx);
-        g_io.delay_ms(20, g_io.ctx);
-    }
-    g_io.resp("DUMP END\r\n", g_io.ctx);
-    g_io.note_cmd("DUMP", g_io.ctx);
 }
 
 bridge_ret_t app_control_itel_set(uint8_t mode)

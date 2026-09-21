@@ -110,6 +110,43 @@ int main(void)
     for (uint16_t i = 0; i < CAP; i++) { uint8_t b = 0; ringbuf_read(&rb, &b); }
     check(ringbuf_num_available(&rb) == 0 && rb.head == rb.tail, "读空后回到空态");
 
+    /* ================= R3: peek / commit（分段发送预取） ================= */
+    {   /* ⑧ peek 不消费：拷贝到 dst 但 tail 不动 */
+        ringbuf_init(&rb);
+        for (uint8_t i = 0; i < 10; i++) ringbuf_write(&rb, (uint8_t)(0x20 + i));
+        uint8_t tmp[10] = {0};
+        uint16_t n = ringbuf_peek(&rb, tmp, 4);
+        check(n == 4, "peek 最多拷贝 max 字节");
+        check(tmp[0] == 0x20 && tmp[3] == 0x23, "peek 拷贝内容正确（从 tail 起）");
+        check(ringbuf_num_available(&rb) == 10, "peek 不推进 tail（未消费）");
+    }
+    {   /* ⑨ commit 推进 tail：与 peek 配对消费 */
+        uint8_t tmp[10] = {0};
+        ringbuf_peek(&rb, tmp, 4);
+        ringbuf_commit(&rb, 4);
+        check(ringbuf_num_available(&rb) == 6, "commit 4 字节后未读余 6");
+        uint8_t b = 0;
+        ringbuf_read(&rb, &b);
+        check(b == 0x24, "commit 后下一字节是原第 5 字节（tail 正确跳进）");
+    }
+    {   /* ⑩ peek 跨回绕：填充到 head 恰好越过缓存末尾回绕，peek 从 tail 读跨边界成序 */
+        ringbuf_init(&rb);
+        for (uint16_t i = 0; i < CAP; i++) ringbuf_write(&rb, (uint8_t)i);       /* 满, head=239 */
+        for (uint16_t i = 0; i < CAP; i++) { uint8_t b = 0; ringbuf_read(&rb, &b); } /* 空, head=tail=239 */
+        for (uint16_t i = 0; i < 10; i++) ringbuf_write(&rb, (uint8_t)(0x50 + i));    /* 跨 239->0, tail=239 */
+        uint8_t tmp[16] = {0};
+        uint16_t n = ringbuf_peek(&rb, tmp, 16);
+        int ok = (n == 10);
+        for (uint16_t i = 0; i < n && ok; i++) if (tmp[i] != (uint8_t)(0x50 + i)) ok = 0;
+        check(ok, "peek 跨缓冲回绕仍成序（239->0）");
+    }
+    {   /* ⑪ commit 越界钳制：n>avail 时只推 avail */
+        ringbuf_init(&rb);
+        for (uint8_t i = 0; i < 5; i++) ringbuf_write(&rb, (uint8_t)(0x40 + i));
+        ringbuf_commit(&rb, 999);
+        check(ringbuf_num_available(&rb) == 0, "commit 越界钳制到 avail（不越过 head）");
+    }
+
     printf("\n== ringbuf 测试桩: %d PASS / %d FAIL ==\n", g_pass, g_fail);
     return (g_fail == 0) ? 0 : 1;
 }

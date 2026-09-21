@@ -47,6 +47,7 @@ bridge_ret_t app_display_init(const app_display_cfg_t *cfg, const app_display_io
     if (cfg == NULL || io == NULL) return BRIDGE_ERR_BAD_ARG;
     if (cfg->disp_period_ms == 0)  return BRIDGE_ERR_BAD_CFG;
     if (io->owner_str == NULL || io->usb_on == NULL || io->rx_overflow == NULL ||
+        io->tx_trouble == NULL ||
         io->uart_silence_s == NULL || io->enc_count == NULL || io->gray_read == NULL)
         return BRIDGE_ERR_BAD_ARG;
     g_cfg = *cfg;
@@ -131,10 +132,11 @@ void app_display_task(uint32_t now)
 
         uint16_t oled_e = oled_bridge_tx_fail_count();
         uint16_t rb_ovf = g_io.rx_overflow(g_io.ctx);
-        if (oled_e || rb_ovf)     /* 有异常才挤掉 USB 状态字段, 正常态保持原版式 */
-            snprintf(b,sizeof(b),"L:%s E%d O%d %s",
+        uint16_t tx_trb = g_io.tx_trouble(g_io.ctx);     /* [R3] TX 丢弃+错误合计 */
+        if (oled_e || rb_ovf || tx_trb)  /* 有异常才挤掉 USB 状态字段, 正常态保持原版式 */
+            snprintf(b,sizeof(b),"L:%s E%d O%d X%d %s",
                      g_io.owner_str(g_io.ctx),
-                     (int)oled_e, (int)rb_ovf,
+                     (int)oled_e, (int)rb_ovf, (int)tx_trb,
                      oled_bridge_fused() ? "FZ" : us);
         else
             snprintf(b,sizeof(b),"L:%s USB:%s U:%s",

@@ -28,6 +28,7 @@
 #include "app/app_wiring.h"          /* 装配入口 app_wiring_load() */
 #include "app/app_link.h"            /* ISR 收包投递 */
 #include "app/app_control.h"         /* WD 闩锁解除 */
+#include "app/app_tx.h"              /* 发送流队列推进 (R3) */
 #include "app/app_display.h"
 #include "driver/line_follower.h"    /* 巡线自动启动仲裁 (脑干职责, 留装载层) */
 #include "driver/imu_bridge.h"
@@ -57,6 +58,8 @@ UART_Handle    uart_debug = {
     .huart      = &huart2,
     .ops        = &uart_platform_ops_stm32,
 };
+/* [R3] UART 接收硬件错误累计 (ORE/framing, PA3 悬空噪声; 中断上下文写, 饱和) */
+volatile uint16_t g_uart_rx_err = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -77,6 +80,18 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *hal_huart)
     app_link_uart_rx_isr(uart_debug.rx_byte);
 #endif
     (void)uart_receive_IT(&uart_debug, &uart_debug.rx_byte);
+}
+
+/* [R3 发送路径专项 3a] UART 硬件错误重挂 (PA3 悬空/噪声 → ORE/framing 会中止接收,
+ * 此前无 ErrorCallback → 静默停摆)。重挂中断接收 + 计数（诊断用, 饱和）。
+ * 中断上下文只计数不解析（ISR 铁律）。 */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *hal_huart)
+{
+    if (hal_huart->Instance != USART2) return;
+#if LINK_UART_ENABLED
+    if (g_uart_rx_err < 0xFFFFu) g_uart_rx_err++;
+    (void)uart_receive_IT(&uart_debug, &uart_debug.rx_byte);   /* 重挂续收 */
+#endif
 }
 /* USER CODE END 0 */
 
@@ -158,6 +173,9 @@ int main(void)
 
         /* ②+③b 控制节拍 (app_control): 判活/WD/闭环搬运/感知 (50ms 门内聚) */
         app_control_task(now);
+
+        /* ②' 发送流推进 (app_tx, R3): 每轮摊销推进 UART IT / USB 段队列 (非阻塞自限速) */
+        app_tx_service();
 
         /* ③ 显示节拍 (app_display): 8 页轮转 (100ms 门内聚) */
         app_display_task(now);

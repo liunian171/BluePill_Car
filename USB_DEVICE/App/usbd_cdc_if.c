@@ -325,6 +325,19 @@ void usbd_cdc_if_register_rx_sink(void (*fn)(uint8_t byte))
   s_rx_sink = fn;
 }
 
+/* [R3 发送路径专项] USB IN 端点可收新段判据（读 TxState）。
+ * 供 app_tx 的 tx_stream.free() 门控：TxState==0 才可调 CDC_Transmit_FS。
+ * TxState 在 usbd_cdc.c USBD_CDC_DataIn 发送完成后写 0（中断上下文），
+ * 主循环只读单字节，原子安全。未枚举/无 pClassData 返回 0（不可发）。 */
+uint8_t CDC_IsTxFree(void)
+{
+  USBD_CDC_HandleTypeDef *hcdc;
+  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED ||
+      hUsbDeviceFS.pClassData == NULL) return 0u;
+  hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+  return (hcdc->TxState == 0U) ? 1u : 0u;
+}
+
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 
 /**
