@@ -20,24 +20,13 @@
  */
 
 #include "app/cmd_exec.h"
+#include "common/fmt.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
 
-/* ---- 出口助手（原 app_link.c ack/tx_raw/cmd_note/line_diag/dec1/spd_to_int 迁入）---- */
-
-/* 带符号浮点 → 四舍五入 int (与 app_control 同实现, 归拢待卫生批 R4) */
-static int spd_to_int(float v)
-{
-    return (int)((v >= 0.0f) ? (v + 0.5f) : (v - 0.5f));
-}
-
-static int dec1(float v)
-{
-    if (v < 0) v = -v;
-    int d = (int)((v - (float)(int)v) * 10.0f + 0.5f);
-    return (d > 9) ? 9 : d;
-}
+/* ---- 出口助手（原 app_link.c ack/tx_raw/cmd_note/line_diag 迁入;
+ *       dec1/spd_to_int 已归拢 common/fmt.h → fmt_dec1/fmt_spd_to_int）---- */
 
 /* 文本回应: 发送 + 记录到 OLED 页4 */
 static void ack(const cmd_exec_io_t *io, const char *fmt, ...)
@@ -138,8 +127,8 @@ void cmd_exec_text(const cmd_exec_io_t *io, const TxtCmd *tc, uint32_t now)
         (void)io->spd_set_gains(1, kp[0], ki[0], kd[0], io->ctx);
         cmd_note(io, "PID SWAP");
         ack(io, "SWAP:M0 %d %d %d  M1 %d %d %d\r\n",
-            spd_to_int(kp[1]*100.0f), spd_to_int(ki[1]*100.0f), spd_to_int(kd[1]*100.0f),
-            spd_to_int(kp[0]*100.0f), spd_to_int(ki[0]*100.0f), spd_to_int(kd[0]*100.0f));
+            fmt_spd_to_int(kp[1]*100.0f), fmt_spd_to_int(ki[1]*100.0f), fmt_spd_to_int(kd[1]*100.0f),
+            fmt_spd_to_int(kp[0]*100.0f), fmt_spd_to_int(ki[0]*100.0f), fmt_spd_to_int(kd[0]*100.0f));
         break;
     }
     case TXTCMD_LINE_EN: {
@@ -158,18 +147,18 @@ void cmd_exec_text(const cmd_exec_io_t *io, const TxtCmd *tc, uint32_t now)
         break;
     case TXTCMD_GK:
         io->line_set_kp(tc->f0, io->ctx);
-        cmd_note(io, "GK=%d.%d", (int)tc->f0, dec1(tc->f0));
-        ack(io, "GK:%d.%d\r\n", (int)tc->f0, dec1(tc->f0));
+        cmd_note(io, "GK=%d.%d", (int)tc->f0, fmt_dec1(tc->f0));
+        ack(io, "GK:%d.%d\r\n", (int)tc->f0, fmt_dec1(tc->f0));
         break;
     case TXTCMD_GD:
         io->line_set_kd(tc->f0, io->ctx);
-        cmd_note(io, "GD=%d.%d", (int)tc->f0, dec1(tc->f0));
-        ack(io, "GD:%d.%d\r\n", (int)tc->f0, dec1(tc->f0));
+        cmd_note(io, "GD=%d.%d", (int)tc->f0, fmt_dec1(tc->f0));
+        ack(io, "GD:%d.%d\r\n", (int)tc->f0, fmt_dec1(tc->f0));
         break;
     case TXTCMD_GS:
         io->line_set_speed(tc->f0, io->ctx);
-        cmd_note(io, "GS=%d.%d", (int)tc->f0, dec1(tc->f0));
-        ack(io, "GS:%d.%d\r\n", (int)tc->f0, dec1(tc->f0));
+        cmd_note(io, "GS=%d.%d", (int)tc->f0, fmt_dec1(tc->f0));
+        ack(io, "GS:%d.%d\r\n", (int)tc->f0, fmt_dec1(tc->f0));
         break;
     case TXTCMD_GI:
         io->line_invert(io->ctx);
@@ -194,15 +183,15 @@ void cmd_exec_text(const cmd_exec_io_t *io, const TxtCmd *tc, uint32_t now)
     case TXTCMD_SERVO: {
         (void)io->steer_set(tc->f0, io->ctx);
         float a = io->steer_get(io->ctx);   /* 回显实际生效角(钳位后) */
-        cmd_note(io, "SV=%d.%d", (int)a, dec1(a));
-        ack(io, "SV:%d.%d\r\n", (int)a, dec1(a));
+        cmd_note(io, "SV=%d.%d", (int)a, fmt_dec1(a));
+        ack(io, "SV:%d.%d\r\n", (int)a, fmt_dec1(a));
         break;
     }
     case TXTCMD_SERVO_NUDGE: {
         (void)io->steer_nudge((float)tc->i0, io->ctx);
         float a = io->steer_get(io->ctx);
-        cmd_note(io, "SV=%d.%d", (int)a, dec1(a));
-        ack(io, "SV:%d.%d\r\n", (int)a, dec1(a));
+        cmd_note(io, "SV=%d.%d", (int)a, fmt_dec1(a));
+        ack(io, "SV:%d.%d\r\n", (int)a, fmt_dec1(a));
         break;
     }
     case TXTCMD_SERVO_LIM: {
@@ -212,9 +201,9 @@ void cmd_exec_text(const cmd_exec_io_t *io, const TxtCmd *tc, uint32_t now)
         else if (tc->i0 == 1) r = io->steer_set_limit_max(tc->f0, io->ctx);
         else                  r = io->steer_set_center(tc->f0, io->ctx);
         /* 非法值: 组件已钳位保底, 此处回显请求值并标记 BAD (义务 6) */
-        cmd_note(io, "S%c=%d.%d%s", "LRC"[tc->i0], (int)tc->f0, dec1(tc->f0),
+        cmd_note(io, "S%c=%d.%d%s", "LRC"[tc->i0], (int)tc->f0, fmt_dec1(tc->f0),
                  (r == STEERING_OK) ? "" : "!");
-        ack(io, "S%c:%d.%d%s\r\n", "LRC"[tc->i0], (int)tc->f0, dec1(tc->f0),
+        ack(io, "S%c:%d.%d%s\r\n", "LRC"[tc->i0], (int)tc->f0, fmt_dec1(tc->f0),
             (r == STEERING_OK) ? "" : " BAD");
         break;
     }
@@ -344,12 +333,12 @@ void cmd_exec_bin(const cmd_exec_io_t *io, uint8_t cmd, const uint8_t *data, uin
 {
     (void)now;
     /* 与搬迁前逐分支等价（len = flen-2; ff 尾已由 app_link 截除） */
-    if      (cmd == 0x01 && len >= 5 && data[0] < 2) { uint8_t id = data[0]; float v; memcpy(&v,&data[1],4); override_manual(io); (void)io->spd_set_target(id, v, io->ctx); cmd_note(io, "M%d=%dRPM", id, (int)((v>0)?v:-v)); ack(io, "M%d:%dRPM\r\n",id,spd_to_int(v)); }
-    else if (cmd == 0x02 && len >= 5 && data[0] < 2) { uint8_t id = data[0]; float v; memcpy(&v,&data[1],4); override_manual(io); (void)io->mtr_set_speed_mps(id,v, io->ctx); cmd_note(io, "M%d=%dcm/s", id, (int)(v*100)); ack(io, "M%d:%dcm/s\r\n",id,spd_to_int(v*100.0f)); }
+    if      (cmd == 0x01 && len >= 5 && data[0] < 2) { uint8_t id = data[0]; float v; memcpy(&v,&data[1],4); override_manual(io); (void)io->spd_set_target(id, v, io->ctx); cmd_note(io, "M%d=%dRPM", id, (int)((v>0)?v:-v)); ack(io, "M%d:%dRPM\r\n",id,fmt_spd_to_int(v)); }
+    else if (cmd == 0x02 && len >= 5 && data[0] < 2) { uint8_t id = data[0]; float v; memcpy(&v,&data[1],4); override_manual(io); (void)io->mtr_set_speed_mps(id,v, io->ctx); cmd_note(io, "M%d=%dcm/s", id, (int)(v*100)); ack(io, "M%d:%dcm/s\r\n",id,fmt_spd_to_int(v*100.0f)); }
     else if (cmd == 0x03 && len >= 1 && data[0] < 2) { uint8_t id = data[0]; override_manual(io); (void)io->spd_stop(id, io->ctx); cmd_note(io, "BRK%d", id); ack(io, "M%d:BRAKE\r\n",id); }
-    else if (cmd == 0x10 && len >= 5 && data[0] < 1) { float v; memcpy(&v,&data[1],4); (void)io->steer_set(v, io->ctx); float a = io->steer_get(io->ctx); cmd_note(io, "SV=%d.%d", (int)a, dec1(a)); ack(io, "SV:%d.%d\r\n", (int)a, dec1(a)); }
+    else if (cmd == 0x10 && len >= 5 && data[0] < 1) { float v; memcpy(&v,&data[1],4); (void)io->steer_set(v, io->ctx); float a = io->steer_get(io->ctx); cmd_note(io, "SV=%d.%d", (int)a, fmt_dec1(a)); ack(io, "SV:%d.%d\r\n", (int)a, fmt_dec1(a)); }
     else if (cmd == 0xE0 && len >= 13 && data[0] < 2) { uint8_t id = data[0]; float kp,ki,kd; memcpy(&kp,&data[1],4); memcpy(&ki,&data[5],4); memcpy(&kd,&data[9],4); (void)io->spd_set_gains(id,kp,ki,kd, io->ctx); cmd_note(io, "PID%d", id); ack(io, "OK\r\n"); }
-    else if (cmd == 0x20 && len >= 5 && data[0] < 2) { uint8_t id = data[0]; float v; memcpy(&v,&data[1],4); if (v >= -100.0f && v <= 100.0f) { override_manual(io); (void)io->mtr_set_rate_0E3(id, (int16_t)(v * 10.0f), io->ctx); cmd_note(io, "DUTY%d", id); ack(io, "D%d:%d.%d\r\n", id, (int)v, dec1(v)); } else { cmd_note(io, "DUTY BAD"); ack(io, "?\r\n"); } }
+    else if (cmd == 0x20 && len >= 5 && data[0] < 2) { uint8_t id = data[0]; float v; memcpy(&v,&data[1],4); if (v >= -100.0f && v <= 100.0f) { override_manual(io); (void)io->mtr_set_rate_0E3(id, (int16_t)(v * 10.0f), io->ctx); cmd_note(io, "DUTY%d", id); ack(io, "D%d:%d.%d\r\n", id, (int)v, fmt_dec1(v)); } else { cmd_note(io, "DUTY BAD"); ack(io, "?\r\n"); } }
     else if (cmd == 0xF0) { cmd_note(io, "PING->PONG"); ack(io, "PONG\r\n"); }
     else { cmd_note(io, "ERR:%02X", cmd); ack(io, "?\r\n"); }
 }

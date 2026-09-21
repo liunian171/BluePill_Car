@@ -23,9 +23,17 @@ if ($LASTEXITCODE -ne 0) { $failed++ }
 Write-Host ""
 Write-Host "== 编译+运行: cmd_exec 命令执行器测试桩 (R2) =="
 & $gcc -Wall -Wextra @incs -o build/pc_test_cmd_exec.exe `
-    test/host_cmd_exec_test.c Core/Src/app/cmd_exec.c
+    test/host_cmd_exec_test.c Core/Src/app/cmd_exec.c Core/Src/common/fmt.c
 if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
 & build\pc_test_cmd_exec.exe
+if ($LASTEXITCODE -ne 0) { $failed++ }
+
+Write-Host ""
+Write-Host "== 编译+运行: fmt 浮点格式化助手测试桩 (R4 卫生批) =="
+& $gcc -Wall -Wextra @incs -o build/pc_test_fmt.exe `
+    test/host_fmt_test.c Core/Src/common/fmt.c
+if ($LASTEXITCODE -ne 0) { Write-Host "编译失败"; exit 1 }
+& build\pc_test_fmt.exe
 if ($LASTEXITCODE -ne 0) { $failed++ }
 
 Write-Host ""

@@ -29,10 +29,10 @@
 #include "steering.h"
 
 /* ---- 组件内部状态（单实例；执行栈单通道，无需数组化）---- */
-static steering_cfg_t     s_cfg;
-static steering_output_fn s_out   = 0;
-static float              s_cur   = 0.0f;   /* 当前生效角（输出域，已钳位） */
-static uint8_t            s_inited = 0;
+static steering_cfg_t     g_cfg;
+static steering_output_fn g_out   = 0;
+static float              g_cur   = 0.0f;   /* 当前生效角（输出域，已钳位） */
+static uint8_t            g_inited = 0;
 
 /* ---- 内部工具 ---- */
 static float clampf(float v, float lo, float hi)
@@ -50,20 +50,20 @@ static float fabsf_local(float v)
 /* 把当前角下发到器件侧：输出域 → 物理角（+安装偏置） */
 static void steering_apply(void)
 {
-    if (s_out) s_out(s_cfg.servo_id, s_cfg.phys_offset + s_cur);
+    if (g_out) g_out(g_cfg.servo_id, g_cfg.phys_offset + g_cur);
 }
 
 /* 限位变更后的统一归一：下限<上限、二者限幅、当前角与直行位拉回区间内 */
 static void steering_normalize(void)
 {
     float t;
-    if (s_cfg.lim_min > s_cfg.lim_max) {          /* 交换 */
-        t = s_cfg.lim_min; s_cfg.lim_min = s_cfg.lim_max; s_cfg.lim_max = t;
+    if (g_cfg.lim_min > g_cfg.lim_max) {          /* 交换 */
+        t = g_cfg.lim_min; g_cfg.lim_min = g_cfg.lim_max; g_cfg.lim_max = t;
     }
-    s_cfg.lim_min = clampf(s_cfg.lim_min, -s_cfg.lim_abs, s_cfg.lim_abs);
-    s_cfg.lim_max = clampf(s_cfg.lim_max, -s_cfg.lim_abs, s_cfg.lim_abs);
-    s_cfg.center  = clampf(s_cfg.center,  s_cfg.lim_min, s_cfg.lim_max);
-    s_cur         = clampf(s_cur,         s_cfg.lim_min, s_cfg.lim_max);
+    g_cfg.lim_min = clampf(g_cfg.lim_min, -g_cfg.lim_abs, g_cfg.lim_abs);
+    g_cfg.lim_max = clampf(g_cfg.lim_max, -g_cfg.lim_abs, g_cfg.lim_abs);
+    g_cfg.center  = clampf(g_cfg.center,  g_cfg.lim_min, g_cfg.lim_max);
+    g_cur         = clampf(g_cur,         g_cfg.lim_min, g_cfg.lim_max);
 }
 
 /* ---- 对外接口 ---- */
@@ -76,10 +76,10 @@ steering_ret_t steering_init(const steering_cfg_t *cfg, steering_output_fn out)
     if (fabsf_local(cfg->lim_min) > cfg->lim_abs ||
         fabsf_local(cfg->lim_max) > cfg->lim_abs) return STEERING_ERR_BAD_CFG;
 
-    s_cfg    = *cfg;
-    s_out    = out;
-    s_cur    = clampf(cfg->center, cfg->lim_min, cfg->lim_max);
-    s_inited = 1;
+    g_cfg    = *cfg;
+    g_out    = out;
+    g_cur    = clampf(cfg->center, cfg->lim_min, cfg->lim_max);
+    g_inited = 1;
 
     steering_apply();          /* 上电即归位（安全铁律：不得输出未定义角） */
     return STEERING_OK;
@@ -87,33 +87,33 @@ steering_ret_t steering_init(const steering_cfg_t *cfg, steering_output_fn out)
 
 steering_ret_t steering_set(float angle)
 {
-    if (!s_inited) return STEERING_ERR_NOT_INIT;
+    if (!g_inited) return STEERING_ERR_NOT_INIT;
 
-    s_cur = clampf(angle, s_cfg.lim_min, s_cfg.lim_max);   /* 行程限位（唯一所有者） */
+    g_cur = clampf(angle, g_cfg.lim_min, g_cfg.lim_max);   /* 行程限位（唯一所有者） */
     steering_apply();
     return STEERING_OK;        /* 钳位属正常语义；实际生效值经 steering_get 可读 */
 }
 
 steering_ret_t steering_nudge(float delta)
 {
-    if (!s_inited) return STEERING_ERR_NOT_INIT;
-    return steering_set(s_cur + delta);
+    if (!g_inited) return STEERING_ERR_NOT_INIT;
+    return steering_set(g_cur + delta);
 }
 
 steering_ret_t steering_center(void)
 {
-    if (!s_inited) return STEERING_ERR_NOT_INIT;
-    return steering_set(s_cfg.center);
+    if (!g_inited) return STEERING_ERR_NOT_INIT;
+    return steering_set(g_cfg.center);
 }
 
 steering_ret_t steering_set_limit_min(float lim_min)
 {
-    if (!s_inited) return STEERING_ERR_NOT_INIT;
+    if (!g_inited) return STEERING_ERR_NOT_INIT;
 
     steering_ret_t ret = STEERING_OK;
-    if (fabsf_local(lim_min) > s_cfg.lim_abs) ret = STEERING_ERR_BAD_ARG;
+    if (fabsf_local(lim_min) > g_cfg.lim_abs) ret = STEERING_ERR_BAD_ARG;
 
-    s_cfg.lim_min = lim_min;
+    g_cfg.lim_min = lim_min;
     steering_normalize();
     steering_apply();          /* 新限位立即生效（当前角可能被拉回区间） */
     return ret;
@@ -121,12 +121,12 @@ steering_ret_t steering_set_limit_min(float lim_min)
 
 steering_ret_t steering_set_limit_max(float lim_max)
 {
-    if (!s_inited) return STEERING_ERR_NOT_INIT;
+    if (!g_inited) return STEERING_ERR_NOT_INIT;
 
     steering_ret_t ret = STEERING_OK;
-    if (fabsf_local(lim_max) > s_cfg.lim_abs) ret = STEERING_ERR_BAD_ARG;
+    if (fabsf_local(lim_max) > g_cfg.lim_abs) ret = STEERING_ERR_BAD_ARG;
 
-    s_cfg.lim_max = lim_max;
+    g_cfg.lim_max = lim_max;
     steering_normalize();
     steering_apply();
     return ret;
@@ -134,33 +134,33 @@ steering_ret_t steering_set_limit_max(float lim_max)
 
 steering_ret_t steering_set_center(float center)
 {
-    if (!s_inited) return STEERING_ERR_NOT_INIT;
+    if (!g_inited) return STEERING_ERR_NOT_INIT;
 
     steering_ret_t ret = STEERING_OK;
     /* 直行位必须在行程内，且不超过绝对值上限 */
-    if (center < s_cfg.lim_min || center > s_cfg.lim_max) ret = STEERING_ERR_BAD_ARG;
-    if (fabsf_local(center) > s_cfg.lim_abs)              ret = STEERING_ERR_BAD_ARG;
+    if (center < g_cfg.lim_min || center > g_cfg.lim_max) ret = STEERING_ERR_BAD_ARG;
+    if (fabsf_local(center) > g_cfg.lim_abs)              ret = STEERING_ERR_BAD_ARG;
 
-    s_cfg.center = clampf(center, s_cfg.lim_min, s_cfg.lim_max);
+    g_cfg.center = clampf(center, g_cfg.lim_min, g_cfg.lim_max);
     return ret;                /* 直行位是"目标"，不立即改变当前角 */
 }
 
 float steering_get(void)
 {
-    return s_cur;
+    return g_cur;
 }
 
 float steering_get_lim_min(void)
 {
-    return s_cfg.lim_min;
+    return g_cfg.lim_min;
 }
 
 float steering_get_lim_max(void)
 {
-    return s_cfg.lim_max;
+    return g_cfg.lim_max;
 }
 
 uint8_t steering_is_init(void)
 {
-    return s_inited;
+    return g_inited;
 }

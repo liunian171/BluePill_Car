@@ -34,33 +34,33 @@
 
 /* ---- 私有状态 ---- */
 
-static app_link_cfg_t s_cfg;
-static app_link_io_t  s_io;
-static uint8_t        s_inited = 0;
+static app_link_cfg_t g_cfg;
+static app_link_io_t  g_io;
+static uint8_t        g_inited = 0;
 
 /* 双 ringbuf (ISR 写/任务读) */
-static RingBuffer s_rb_uart;
-static RingBuffer s_rb_usb;
+static RingBuffer g_rb_uart;
+static RingBuffer g_rb_usb;
 
 /* 按链路独立的解析状态 */
-static uint8_t  s_txt[APP_LINK_COUNT][20];
-static uint8_t  s_txt_len[APP_LINK_COUNT];
-static uint8_t  s_frame[APP_LINK_COUNT][32];
-static uint8_t  s_f_len[APP_LINK_COUNT];
-static uint8_t  s_in_frame[APP_LINK_COUNT];
-static uint32_t s_t_frame[APP_LINK_COUNT];
+static uint8_t  g_txt[APP_LINK_COUNT][20];
+static uint8_t  g_txt_len[APP_LINK_COUNT];
+static uint8_t  g_frame[APP_LINK_COUNT][32];
+static uint8_t  g_f_len[APP_LINK_COUNT];
+static uint8_t  g_in_frame[APP_LINK_COUNT];
+static uint32_t g_t_frame[APP_LINK_COUNT];
 
 /* UART rx 记账 (页7 "U:<秒>" 数据源) */
-static uint32_t s_uart_last_rx = 0;
-static uint8_t  s_uart_seen    = 0;
-static uint32_t s_now          = 0;
+static uint32_t g_uart_last_rx = 0;
+static uint8_t  g_uart_seen    = 0;
+static uint32_t g_now          = 0;
 
 /* ---- 出口助手（BUSY 拒止应答 + 寻迹诊断用; 命令应答已迁 cmd_exec） ---- */
 
 /* 裸发送: 不记录 OLED 应答页 */
 static void tx_raw(const char *buf, int n)
 {
-    s_io.sink.send(buf, n, s_io.sink.ctx);
+    g_io.sink.send(buf, n, g_io.sink.ctx);
 }
 
 /* 文本回应 + 页4 记录 */
@@ -73,7 +73,7 @@ static void ack(const char *fmt, ...)
     va_end(ap);
     if (n > 0) {
         tx_raw(buf, n);
-        s_io.page_note.note_resp(buf, s_io.page_note.ctx);
+        g_io.page_note.note_resp(buf, g_io.page_note.ctx);
     }
 }
 
@@ -85,7 +85,7 @@ static void cmd_note(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    s_io.page_note.note_cmd(buf, s_io.page_note.ctx);
+    g_io.page_note.note_cmd(buf, g_io.page_note.ctx);
 }
 
 /* 寻迹诊断代理: 转发 line_follower 事件到串口 (高频, 不占应答页) */
@@ -96,8 +96,8 @@ static void line_diag(const char *msg)
     if (n > 0) tx_raw(buf, n);
 }
 
-/* [R2] 命令执行注入面: wiring 已经填好 io.cmd, 直接从 s_io 取, 命令执行委托 cmd_exec */
-static const cmd_exec_io_t *cmd_io(void) { return &s_io.cmd; }
+/* [R2] 命令执行注入面: wiring 已经填好 io.cmd, 直接从 g_io 取, 命令执行委托 cmd_exec */
+static const cmd_exec_io_t *cmd_io(void) { return &g_io.cmd; }
 
 /* ---- 生命周期 ---- */
 
@@ -110,38 +110,38 @@ bridge_ret_t app_link_init(const app_link_cfg_t *cfg, const app_link_io_t *io)
         io->owner_link == NULL || io->override_manual == NULL ||
         io->wd_feed == NULL || io->session_active == NULL)
         return BRIDGE_ERR_BAD_ARG;
-    s_cfg = *cfg;
-    s_io  = *io;
-    ringbuf_init(&s_rb_uart);
-    ringbuf_init(&s_rb_usb);
-    memset(s_txt_len, 0, sizeof(s_txt_len));
-    memset(s_in_frame, 0, sizeof(s_in_frame));
-    memset(s_f_len, 0, sizeof(s_f_len));
+    g_cfg = *cfg;
+    g_io  = *io;
+    ringbuf_init(&g_rb_uart);
+    ringbuf_init(&g_rb_usb);
+    memset(g_txt_len, 0, sizeof(g_txt_len));
+    memset(g_in_frame, 0, sizeof(g_in_frame));
+    memset(g_f_len, 0, sizeof(g_f_len));
     /* 寻迹诊断事件回调注册 (保留; cmd_exec 只做命令执行, 事件外泄仍归命令链宿主) */
     line_follower_set_event_cb(line_diag);
-    s_inited = 1;
+    g_inited = 1;
     return BRIDGE_OK;
 }
 
 /* ---- ISR 注入（只写 ringbuf, 不解析） ---- */
 
-void app_link_uart_rx_isr(uint8_t byte) { ringbuf_write(&s_rb_uart, byte); }
-void app_link_usb_rx_isr(uint8_t byte)  { ringbuf_write(&s_rb_usb, byte); }
+void app_link_uart_rx_isr(uint8_t byte) { ringbuf_write(&g_rb_uart, byte); }
+void app_link_usb_rx_isr(uint8_t byte)  { ringbuf_write(&g_rb_usb, byte); }
 
 /* ---- 只读查询 ---- */
 
 uint16_t app_link_rx_overflow(void)
 {
-    uint16_t ovf = (uint16_t)ringbuf_overflow(&s_rb_uart);
-    if (s_cfg.usb_enabled)
-        ovf = (uint16_t)(ovf + ringbuf_overflow(&s_rb_usb));
+    uint16_t ovf = (uint16_t)ringbuf_overflow(&g_rb_uart);
+    if (g_cfg.usb_enabled)
+        ovf = (uint16_t)(ovf + ringbuf_overflow(&g_rb_usb));
     return ovf;
 }
 
 uint32_t app_link_uart_silence_s(void)
 {
-    if (!s_uart_seen) return 0xFFFFFFFFu;
-    return (s_now - s_uart_last_rx) / 1000;
+    if (!g_uart_seen) return 0xFFFFFFFFu;
+    return (g_now - g_uart_last_rx) / 1000;
 }
 
 /* ---- 命令执行委托（门控后; BUSY 拒止仍在门控处） ---- */
@@ -157,50 +157,50 @@ static void reply_busy(void)
 
 void app_link_task(uint32_t now)
 {
-    if (!s_inited) return;
-    s_now = now;
+    if (!g_inited) return;
+    g_now = now;
 
     static uint8_t b;   /* 单字节暂存 */
 
     for (uint8_t li = 0; li < APP_LINK_COUNT; li++) {
-        if (li == APP_LINK_UART   && !s_cfg.uart_enabled) continue;
-        if (li == APP_LINK_USB    && !s_cfg.usb_enabled)  continue;
-        uint8_t budget = s_cfg.byte_budget;
-        RingBuffer *rb = (li == APP_LINK_UART) ? &s_rb_uart : &s_rb_usb;
+        if (li == APP_LINK_UART   && !g_cfg.uart_enabled) continue;
+        if (li == APP_LINK_USB    && !g_cfg.usb_enabled)  continue;
+        uint8_t budget = g_cfg.byte_budget;
+        RingBuffer *rb = (li == APP_LINK_UART) ? &g_rb_uart : &g_rb_usb;
         while (budget-- && ringbuf_read(rb, &b) == 0) {
-            s_io.set_active(li, s_io.ctx);
-            if (li == APP_LINK_UART) { s_uart_last_rx = now; s_uart_seen = 1; }
-            if (li == s_io.owner_link(s_io.ctx)) {
-                s_io.wd_feed(s_io.ctx);   /* 看门狗: owner 字节算"活" */
+            g_io.set_active(li, g_io.ctx);
+            if (li == APP_LINK_UART) { g_uart_last_rx = now; g_uart_seen = 1; }
+            if (li == g_io.owner_link(g_io.ctx)) {
+                g_io.wd_feed(g_io.ctx);   /* 看门狗: owner 字节算"活" */
             }
-            if (b == 0xAA && !s_in_frame[li]) { s_f_len[li] = 0; s_in_frame[li] = 1; s_t_frame[li] = now; }
-            if (s_in_frame[li]) {
-                if (s_f_len[li] >= sizeof(s_frame[li])) { s_in_frame[li] = 0; continue; }
-                s_frame[li][s_f_len[li]++] = b;
-                s_t_frame[li] = now;
-                if (s_f_len[li] >= 2 && s_frame[li][s_f_len[li]-2] == 0xFF && s_frame[li][s_f_len[li]-1] == 0xFF) {
-                    uint8_t cmd = s_frame[li][1];
+            if (b == 0xAA && !g_in_frame[li]) { g_f_len[li] = 0; g_in_frame[li] = 1; g_t_frame[li] = now; }
+            if (g_in_frame[li]) {
+                if (g_f_len[li] >= sizeof(g_frame[li])) { g_in_frame[li] = 0; continue; }
+                g_frame[li][g_f_len[li]++] = b;
+                g_t_frame[li] = now;
+                if (g_f_len[li] >= 2 && g_frame[li][g_f_len[li]-2] == 0xFF && g_frame[li][g_f_len[li]-1] == 0xFF) {
+                    uint8_t cmd = g_frame[li][1];
                     /* [R2] data = 帧参数字节 (AA/CMD 之后, FF/FF 之前) */
-                    const uint8_t *data = &s_frame[li][2];
-                    uint8_t len = (uint8_t)(s_f_len[li] - 2);
+                    const uint8_t *data = &g_frame[li][2];
+                    uint8_t len = (uint8_t)(g_f_len[li] - 2);
                     /* [P2 仲裁门控] 二进制帧: 非 owner 仅放行心跳 0xF0, 其余回 BUSY */
-                    if (li != s_io.owner_link(s_io.ctx) && cmd != 0xF0) {
+                    if (li != g_io.owner_link(g_io.ctx) && cmd != 0xF0) {
                         reply_busy();
                     } else {
                         cmd_exec_bin(cmd_io(), cmd, data, len, now);
                     }
-                    s_in_frame[li] = 0; s_f_len[li] = 0;
+                    g_in_frame[li] = 0; g_f_len[li] = 0;
                 }
                 continue;
             }
             if (b == '\r') continue;
-            if (b == '\n') s_txt[li][s_txt_len[li]] = 0;
-            else if (s_txt_len[li] < 19) { s_txt[li][s_txt_len[li]++] = b; continue; }
-            if (s_txt_len[li] > 0) {
+            if (b == '\n') g_txt[li][g_txt_len[li]] = 0;
+            else if (g_txt_len[li] < 19) { g_txt[li][g_txt_len[li]++] = b; continue; }
+            if (g_txt_len[li] > 0) {
                 TxtCmd tc;
-                if (txt_cmd_parse((char *)s_txt[li], &tc)) {
+                if (txt_cmd_parse((char *)g_txt[li], &tc)) {
                     /* [P2 仲裁门控] 非 owner 仅放行安全例外 (STOP/PING/LINK) */
-                    if (li != s_io.owner_link(s_io.ctx) &&
+                    if (li != g_io.owner_link(g_io.ctx) &&
                         tc.type != TXTCMD_PING && tc.type != TXTCMD_STOP &&
                         tc.type != TXTCMD_LINK) {
                         reply_busy();
@@ -212,13 +212,13 @@ void app_link_task(uint32_t now)
                     ack("?\r\n");
                 }
             }
-            s_txt_len[li] = 0;
+            g_txt_len[li] = 0;
           }
         }
 
         /* 无线丢包保护: 二进制帧不完整超时丢弃 */
         for (uint8_t li = 0; li < APP_LINK_COUNT; li++)
-            if (s_in_frame[li] && (now - s_t_frame[li]) > s_cfg.frame_timeout_ms) {
-                s_in_frame[li] = 0; s_f_len[li] = 0;
+            if (g_in_frame[li] && (now - g_t_frame[li]) > g_cfg.frame_timeout_ms) {
+                g_in_frame[li] = 0; g_f_len[li] = 0;
             }
 }

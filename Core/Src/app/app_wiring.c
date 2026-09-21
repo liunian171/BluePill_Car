@@ -54,7 +54,7 @@ static UserGPIO_Handle motor_a_in2 = { GPIOB, GPIO_PIN_12, &usergpio_platform_op
 static UserGPIO_Handle motor_b_in1 = { GPIOB, GPIO_PIN_14, &usergpio_platform_ops_stm32 };
 static UserGPIO_Handle motor_b_in2 = { GPIOB, GPIO_PIN_15, &usergpio_platform_ops_stm32 };
 
-static Encoder_Handle henc1, henc2;
+static Encoder_Handle henc[2];
 
 static I2C_Handle imu_i2c = {
     .i2c_context = &hi2c2,
@@ -113,8 +113,7 @@ static speed_loop_cfg_t g_spd_cfg = {
 
 static void spd_io_set_rpm(uint8_t id, float rpm) { (void)motor_bridge_set_speed_rpm(id, rpm); }
 static void spd_io_brake  (uint8_t id)            { (void)motor_bridge_brake(id); }
-static int32_t spd_io_read_enc(uint8_t id)        { return (id == 0) ? encoder_get_count(&henc1)
-                                                                      : encoder_get_count(&henc2); }
+static int32_t spd_io_read_enc(uint8_t id)        { return encoder_get_count(&henc[id]); }
 static const speed_loop_io_t g_spd_io = {
     .set_rpm  = spd_io_set_rpm,
     .brake    = spd_io_brake,
@@ -133,7 +132,7 @@ static const odom_cfg_t g_odom_cfg = {
 };
 static int32_t odom_io_read_enc(uint8_t id)
 {
-    return (id == 0) ? encoder_get_count(&henc1) : encoder_get_count(&henc2);
+    return encoder_get_count(&henc[id]);
 }
 static void odom_io_get_yaw(float *yaw_deg)
 {
@@ -171,7 +170,7 @@ static uint32_t ctl_last_rx_tick(void *ctx) { (void)ctx; return g_last_rx_tick; 
 static int32_t  ctl_enc_count(uint8_t id, void *ctx)
 {
     (void)ctx;
-    return (id == 0) ? encoder_get_count(&henc1) : encoder_get_count(&henc2);
+    return encoder_get_count(&henc[id]);
 }
 static void ctl_send_line(const char *s, int len, void *ctx)
 {   /* 发送出口经 app_tx (active 由 app_link 消费时登记) */
@@ -222,7 +221,7 @@ static void arb_broadcast_cb(const char *msg)
 static void link_ppr_set(uint8_t id, uint16_t ppr, void *ctx)
 {   /* E 命令在线改 PPR (编码器句柄属装配层) */
     (void)ctx;
-    if (id == 0) henc1.ppr = ppr; else henc2.ppr = ppr;
+    if (id < 2) henc[id].ppr = ppr;
 }
 
 /* ════════ R2: cmd_exec 注入面 glue（组件/桥/宿主 → cmd_exec 回调签名适配）════════
@@ -335,71 +334,71 @@ static void link_fill_cmd_io(app_link_io_t *io)
 }
 
 /* ---- init 失败定位 ---- */
-static const char *s_failed = "";
+static const char *g_failed = "";
 
 /* ---- 装配入口 ---- */
 
 bridge_ret_t app_wiring_load(void)
 {
-    /* ---- 编码器 (PPR = car_config 单一真值源) ---- */
-    henc1.htim  = &htim2;  henc1.ops = encoder_platform_get_ops();
-    henc1.ppr   = CAR_PPR; henc1.position = 0;
-    encoder_start(&henc1);
-    henc2.htim  = &htim3;  henc2.ops = encoder_platform_get_ops();
-    henc2.ppr   = CAR_PPR; henc2.position = 0;
-    encoder_start(&henc2);
+    /* ---- 编码器 (PPR = car_config 单一真值源; enable 按 0,1 次序) ---- */
+    henc[0].htim  = &htim2;  henc[0].ops = encoder_platform_get_ops();
+    henc[0].ppr   = CAR_PPR; henc[0].position = 0;
+    encoder_start(&henc[0]);
+    henc[1].htim  = &htim3;  henc[1].ops = encoder_platform_get_ops();
+    henc[1].ppr   = CAR_PPR; henc[1].position = 0;
+    encoder_start(&henc[1]);
 
     /* ---- PWM 电机 20kHz 初始 0% ---- */
     pwm_set_freq(&pwm_tim1_ch1, CAR_MOTOR_PWM_HZ); pwm_set_duty_0E3(&pwm_tim1_ch1, 0); pwm_start(&pwm_tim1_ch1);
     pwm_set_freq(&pwm_tim1_ch2, CAR_MOTOR_PWM_HZ); pwm_set_duty_0E3(&pwm_tim1_ch2, 0); pwm_start(&pwm_tim1_ch2);
 
     /* ---- 电机桥（C1：配置结构注入 + init 失败即停）---- */
-    s_failed = "motor";
+    g_failed = "motor";
     if (motor_bridge_init(0, &g_motor_cfg[0]) != BRIDGE_OK ||
         motor_bridge_init(1, &g_motor_cfg[1]) != BRIDGE_OK)
         return BRIDGE_ERR_IO;
 
     /* ---- 速度环（ppr 以编码器实测为准; 参数 = SIMC 平衡档, 2026-09-13）---- */
-    s_failed = "speed_loop";
-    g_spd_cfg.ch[0].ppr = (float)henc1.ppr;
-    g_spd_cfg.ch[1].ppr = (float)henc2.ppr;
+    g_failed = "speed_loop";
+    g_spd_cfg.ch[0].ppr = (float)henc[0].ppr;
+    g_spd_cfg.ch[1].ppr = (float)henc[1].ppr;
     if (speed_loop_init(&g_spd_cfg, &g_spd_io) != SPEED_LOOP_OK)
         return BRIDGE_ERR_IO;
 
     /* ---- 舵机 50Hz + 桥 + 转向: 上电回直行位 = 安全铁律 ---- */
-    s_failed = "servo";
+    g_failed = "servo";
     pwm_set_freq(&pwm_tim4_ch3, CAR_SERVO_PWM_HZ); pwm_start(&pwm_tim4_ch3);
     if (servo_bridge_init(0, &g_servo_cfg) != BRIDGE_OK)
         return BRIDGE_ERR_IO;
     (void)servo_bridge_start(0);
-    s_failed = "steering";
+    g_failed = "steering";
     if (steering_init(&g_steering_cfg, steering_output_to_servo) != STEERING_OK)
         return BRIDGE_ERR_IO;
     steering_center();
 
     /* ---- OLED ---- */
-    s_failed = "oled";
+    g_failed = "oled";
     if (oled_bridge_init(&g_oled_cfg) != BRIDGE_OK)
         return BRIDGE_ERR_IO;
     oled_bridge_show_string_small(0,0,"BLUEPILL PID OK");
     oled_bridge_show_string_small(2,0,"Boot...");
 
     /* ---- 寻迹 (诊断回调注册归 app_link_init) ---- */
-    s_failed = "line_follower";
+    g_failed = "line_follower";
     line_follower_init(CAR_LF_BASE_SPD, CAR_LF_KP);
 
     /* ---- IMU ---- */
-    s_failed = "imu";
+    g_failed = "imu";
     if (imu_bridge_init(0, &g_imu_cfg) != BRIDGE_OK)
         return BRIDGE_ERR_IO;
 
     /* ---- 里程计 (C1 故障注入已真机验证: bad cfg → 整机拒运行, §22) ---- */
-    s_failed = "odom";
+    g_failed = "odom";
     if (odom_init(&g_odom_cfg, &g_odom_io) != ODOM_OK)
         return BRIDGE_ERR_IO;
 
     /* ---- app_tx 发送出口 (先于任何发送: 仲裁广播/横幅) ---- */
-    s_failed = "app_tx";
+    g_failed = "app_tx";
     {
         app_tx_cfg_t tx_cfg = {
             .uart_enabled          = CAR_FEATURE_UART,
@@ -411,7 +410,7 @@ bridge_ret_t app_wiring_load(void)
     }
 
     /* ---- app_control 50ms 节拍宿主 ---- */
-    s_failed = "app_control";
+    g_failed = "app_control";
     {
         app_control_cfg_t ctl_cfg = {
             .ctrl_period_ms = CAR_CTRL_PERIOD_MS,
@@ -434,7 +433,7 @@ bridge_ret_t app_wiring_load(void)
     }
 
     /* ---- app_display 100ms 显示节拍宿主 ---- */
-    s_failed = "app_display";
+    g_failed = "app_display";
     {
         app_display_cfg_t disp_cfg = {
             .disp_period_ms = CAR_DISP_PERIOD_MS,
@@ -454,7 +453,7 @@ bridge_ret_t app_wiring_load(void)
 
     /* ---- 指挥权仲裁初始化 (原 main.c init 块; 拆分时曾遗失 → 空指针广播死机) ----
      * alive_init: 双链路=未知(-1) 宽限观望; USB=0 判死(固定 UART); UART=0 判活(固定 USB) */
-    s_failed = "link_arbiter";
+    g_failed = "link_arbiter";
     {
         /* [批次0] link_arb_init 现为 cfg 值拷贝（组件层契约统一为拷贝注入）,
          * 调用方生命周期不再背书 → 普通 const 局部即可, 无需 static。
@@ -476,7 +475,7 @@ bridge_ret_t app_wiring_load(void)
     }
 
     /* ---- app_link 命令链宿主 + P1-8 收包 sink 注册 ---- */
-    s_failed = "app_link";
+    g_failed = "app_link";
     {
         app_link_cfg_t link_cfg = {
             .uart_enabled     = CAR_FEATURE_UART,
@@ -500,11 +499,11 @@ bridge_ret_t app_wiring_load(void)
         usbd_cdc_if_register_rx_sink(app_link_usb_rx_isr);   /* [P1-8] */
     }
 
-    s_failed = "";
+    g_failed = "";
     return BRIDGE_OK;
 }
 
 const char *app_wiring_failed_module(void)
 {
-    return s_failed;
+    return g_failed;
 }

@@ -24,29 +24,29 @@
 
 extern USBD_HandleTypeDef hUsbDeviceFS;   /* 定义在 usb_device.c */
 
-static app_tx_cfg_t s_cfg;
-static uint8_t      s_active_link = APP_LINK_USB;   /* 应答路由: 最近命令来源 */
-static uint8_t      s_inited = 0;
+static app_tx_cfg_t g_cfg;
+static uint8_t      g_active_link = APP_LINK_USB;   /* 应答路由: 最近命令来源 */
+static uint8_t      g_inited = 0;
 
 /* ---- 两个原始出口（语义与原 main.c 静态函数逐行一致） ---- */
 
 static void tx_usb(const char *buf, int n)
 {
-    if (!s_cfg.usb_enabled) return;                       /* [P3] 链路下线 no-op */
+    if (!g_cfg.usb_enabled) return;                       /* [P3] 链路下线 no-op */
     if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED ||
         hUsbDeviceFS.pClassData == NULL)
         return;                                           /* 未枚举: 防空指针硬错误 */
     uint32_t t0 = HAL_GetTick();
     while (CDC_Transmit_FS((uint8_t *)buf, (uint16_t)n) == USBD_BUSY) {
-        if ((HAL_GetTick() - t0) > s_cfg.usb_busy_timeout_ms) return;  /* 限时弃 */
+        if ((HAL_GetTick() - t0) > g_cfg.usb_busy_timeout_ms) return;  /* 限时弃 */
     }
 }
 
 static void tx_uart(const char *buf, int n)
 {
-    if (!s_cfg.uart_enabled) return;                      /* [P3] 链路下线 no-op */
+    if (!g_cfg.uart_enabled) return;                      /* [P3] 链路下线 no-op */
     (void)HAL_UART_Transmit(&huart2, (uint8_t *)buf, (uint16_t)n,
-                            s_cfg.uart_block_timeout_ms);
+                            g_cfg.uart_block_timeout_ms);
 }
 
 /* ---- 公开接口 ---- */
@@ -55,15 +55,15 @@ bridge_ret_t app_tx_init(const app_tx_cfg_t *cfg)
 {
     if (cfg == NULL) return BRIDGE_ERR_BAD_ARG;
     if (!cfg->uart_enabled && !cfg->usb_enabled) return BRIDGE_ERR_BAD_CFG; /* 双 0 无意义 */
-    s_cfg = *cfg;
-    s_active_link = cfg->usb_enabled ? APP_LINK_USB : APP_LINK_UART;
-    s_inited = 1;
+    g_cfg = *cfg;
+    g_active_link = cfg->usb_enabled ? APP_LINK_USB : APP_LINK_UART;
+    g_inited = 1;
     return BRIDGE_OK;
 }
 
 void app_tx_send_by_link(uint8_t link, const char *buf, int n)
 {
-    if (!s_inited || buf == NULL || n <= 0) return;
+    if (!g_inited || buf == NULL || n <= 0) return;
     if (link == APP_LINK_USB) tx_usb(buf, n);
     else                      tx_uart(buf, n);
 }
@@ -76,12 +76,12 @@ void app_tx_send_to_owner(const char *buf, int n)
 
 void app_tx_set_active(uint8_t link)
 {
-    s_active_link = (link == APP_LINK_USB) ? APP_LINK_USB : APP_LINK_UART;
+    g_active_link = (link == APP_LINK_USB) ? APP_LINK_USB : APP_LINK_UART;
 }
 
 uint8_t app_tx_active(void)
 {
-    return s_active_link;
+    return g_active_link;
 }
 
 uint8_t app_tx_owner_main_link(void)
@@ -90,8 +90,8 @@ uint8_t app_tx_owner_main_link(void)
      * 两套编号相反, 换算在此唯一收口（2026-09-19 真机 bug 教训）。
      * 单链路模式直接返回唯一存活链路, 不依赖仲裁状态机（cfg 为编译期常量,
      * 分支可被优化; 门控本体仍在 CMake stub 取舍 + 组装层消费门控两处）。 */
-    if (!s_cfg.usb_enabled)  return APP_LINK_UART;
-    if (!s_cfg.uart_enabled) return APP_LINK_USB;
+    if (!g_cfg.usb_enabled)  return APP_LINK_UART;
+    if (!g_cfg.uart_enabled) return APP_LINK_USB;
     return (link_arb_owner() == LINK_ARB_USB) ? APP_LINK_USB : APP_LINK_UART;
 }
 
